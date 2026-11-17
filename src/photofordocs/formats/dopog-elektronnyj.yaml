@@ -1,0 +1,14 @@
+id: dopog-elektronnyj
+name: ДОПОГ (электронный)
+width_mm: 31.3
+height_mm: 45
+head_height_mm: 31.5
+chin_bottom_mm: 6
+background: '#C8C8C8'
+note: >
+  Файл 352×506 точек, серый фон, голова примерно 65–75% кадра. На лист этот размер кладётся как кадр 31,3×45 мм. Перед сдачей сверьте текущую форму свидетельства.
+have_corner: false
+corner_kind: 2
+corner_placement: 0
+corner_rx_mm: 89
+corner_ry_mm: 98

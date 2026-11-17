@@ -1,0 +1,14 @@
+id: vod-udost-nacionalnye-elektr
+name: Вод.удост.(национальные, электр)
+width_mm: 21
+height_mm: 30
+head_height_mm: 23
+chin_bottom_mm: 5
+background: '#FFFFFF'
+note: >
+  21×30 мм. Цветная. Ориентир кадра: голова 23 мм, под подбородком 5 мм. Электронное национальное водительское удостоверение, файл около 21×30 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 4
+corner_placement: 15
+corner_rx_mm: 24
+corner_ry_mm: 24

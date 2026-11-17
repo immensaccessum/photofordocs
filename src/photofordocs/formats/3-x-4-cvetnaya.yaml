@@ -1,0 +1,14 @@
+id: 3-x-4-cvetnaya
+name: 3 х 4 цветная
+width_mm: 30
+height_mm: 40
+head_height_mm: 32
+chin_bottom_mm: 4
+background: '#FFFFFF'
+note: >
+  30×40 мм. Цветная. Ориентир кадра: голова 32 мм, под подбородком 4 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 2
+corner_rx_mm: 18
+corner_ry_mm: 18

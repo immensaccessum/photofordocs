@@ -1,0 +1,15 @@
+id: 4-x-5-5-rabotnik-mvd
+name: 4 x 5.5 Работник МВД
+width_mm: 40
+height_mm: 55
+head_height_mm: 47
+chin_bottom_mm: 4
+background: '#FFFFFF'
+note: >
+  40×55 мм. Чёрно-белая. Ориентир кадра: голова 47 мм, под подбородком 4 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18
+show_in_menu: false

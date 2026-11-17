@@ -1,0 +1,15 @@
+id: 3-x-4-levyj-ugol
+name: 3 x 4 левый угол
+width_mm: 27
+height_mm: 34
+head_height_mm: 9
+chin_bottom_mm: 21
+background: '#FFFFFF'
+note: >
+  27×34 мм. Чёрно-белая. Ориентир кадра: голова 9 мм, под подбородком 21 мм. На бланке бывает уголок: включите его на панели формата. На лист обычно кладут 6 шт. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: true
+corner_kind: 2
+corner_placement: 2
+corner_rx_mm: 13
+corner_ry_mm: 13
+show_in_menu: false

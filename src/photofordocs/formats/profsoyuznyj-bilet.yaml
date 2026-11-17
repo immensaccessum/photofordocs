@@ -1,0 +1,15 @@
+id: profsoyuznyj-bilet
+name: Профсоюзный билет
+width_mm: 25
+height_mm: 25
+head_height_mm: 17
+chin_bottom_mm: 4
+background: '#FFFFFF'
+note: >
+  25×25 мм. Чёрно-белая. Ориентир кадра: голова 17 мм, под подбородком 4 мм. На бланке бывает уголок: включите его на панели формата. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: true
+corner_kind: 1
+corner_placement: 15
+corner_rx_mm: 12
+corner_ry_mm: 12
+show_in_menu: false

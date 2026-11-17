@@ -1,0 +1,13 @@
+# Локальная копия исходников оригинала. В репозиторий не входит.
+оригинал/
+
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+output/
+dist/
+build/
+*.exe
+*.rar

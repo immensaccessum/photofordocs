@@ -1,0 +1,14 @@
+id: zagran
+name: Загранпаспорт
+width_mm: 35
+height_mm: 45
+head_height_mm: 28
+chin_bottom_mm: 15
+background: '#FFFFFF'
+note: >
+  35×45 мм, белый фон, анфас, рот закрыт, глаза открыты. От макушки до подбородка не больше 80% кадра. Ориентир: голова 25–30 мм, от подбородка до нижнего края не меньше 15 мм. Для Госуслуг сохраните один файл JPEG, а не весь лист.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18

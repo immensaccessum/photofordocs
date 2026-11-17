@@ -1,0 +1,15 @@
+id: usa-visa
+name: Виза США
+width_mm: 51
+height_mm: 51
+head_height_mm: 30
+chin_bottom_mm: 12
+background: '#FFFFFF'
+note: >
+  Квадрат 51×51 мм (2×2 дюйма), белый или почти белый фон. Высота головы обычно 25–35 мм. Сверьте актуальный лист требований консульства.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 12
+corner_ry_mm: 12
+show_in_menu: false

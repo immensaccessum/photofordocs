@@ -1,0 +1,15 @@
+id: veteran-vojny-3-x-4
+name: Ветеран войны (3 x 4)
+width_mm: 27
+height_mm: 34
+head_height_mm: 9
+chin_bottom_mm: 21
+background: '#FFFFFF'
+note: >
+  27×34 мм. Чёрно-белая. Ориентир кадра: голова 9 мм, под подбородком 21 мм. На лист обычно кладут 6 шт. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18
+show_in_menu: false

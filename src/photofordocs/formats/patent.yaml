@@ -1,0 +1,14 @@
+id: patent
+name: Патент
+width_mm: 30
+height_mm: 40
+head_height_mm: 26
+chin_bottom_mm: 10
+background: '#FFFFFF'
+note: >
+  30×40 мм. Цветная. Ориентир кадра: голова 26 мм, под подбородком 10 мм. На бланке бывает уголок: включите его на панели формата. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: true
+corner_kind: 1
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18

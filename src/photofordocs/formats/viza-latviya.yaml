@@ -1,0 +1,15 @@
+id: viza-latviya
+name: Виза Латвия
+width_mm: 35
+height_mm: 45
+head_height_mm: 37
+chin_bottom_mm: 4
+background: '#FFFFFF'
+note: >
+  35×45 мм. Цветная. Ориентир кадра: голова 37 мм, под подбородком 4 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18
+show_in_menu: false

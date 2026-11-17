@@ -1,0 +1,14 @@
+id: passport-rf
+name: Паспорт РФ
+width_mm: 35
+height_mm: 45
+head_height_mm: 32
+chin_bottom_mm: 7
+background: '#FFFFFF'
+note: >
+  35×45 мм, белый ровный фон, анфас, в кадре голова и верх плеч. Без форменной и верхней одежды, без шарфа на подбородке. Высота головы 32 мм — ориентир для печати; сдвиньте кадр, если волосы или плечи обрезаются.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18

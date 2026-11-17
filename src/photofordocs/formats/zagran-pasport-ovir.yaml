@@ -1,0 +1,14 @@
+id: zagran-pasport-ovir
+name: Загран. паспорт ОВИР
+width_mm: 35
+height_mm: 45
+head_height_mm: 12
+chin_bottom_mm: 28
+background: '#FFFFFF'
+note: >
+  35×45 мм. Чёрно-белая. Ориентир кадра: голова 12 мм, под подбородком 28 мм. На бланке бывает уголок: включите его на панели формата. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: true
+corner_kind: 1
+corner_placement: 15
+corner_rx_mm: 17
+corner_ry_mm: 22

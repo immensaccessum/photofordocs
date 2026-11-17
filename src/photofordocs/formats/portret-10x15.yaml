@@ -1,0 +1,14 @@
+id: portret-10x15
+name: Портрет 10x15
+width_mm: 102
+height_mm: 152
+head_height_mm: 70
+chin_bottom_mm: 62
+background: '#FFFFFF'
+note: >
+  102×152 мм. Цветная. Ориентир кадра: голова 70 мм, под подбородком 62 мм. На лист обычно кладут 1 шт. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18

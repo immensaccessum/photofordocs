@@ -1,0 +1,15 @@
+id: 4-5-x-5
+name: 4.5 x 5
+width_mm: 45
+height_mm: 50
+head_height_mm: 42
+chin_bottom_mm: 4
+background: '#FFFFFF'
+note: >
+  45×50 мм. Чёрно-белая. Ориентир кадра: голова 42 мм, под подбородком 4 мм. На бланке бывает уголок: включите его на панели формата. На лист обычно кладут 6 шт. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: true
+corner_kind: 0
+corner_placement: 2
+corner_rx_mm: 18
+corner_ry_mm: 18
+show_in_menu: false

@@ -1,0 +1,14 @@
+id: voen-bilet-soldata-matrosa
+name: Воен. билет солдата, матроса
+width_mm: 25
+height_mm: 35
+head_height_mm: 20
+chin_bottom_mm: 12
+background: '#FFFFFF'
+note: >
+  25×35 мм. Чёрно-белая. Ориентир кадра: голова 20 мм, под подбородком 12 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18

@@ -1,0 +1,14 @@
+id: schengen
+name: Шенгенская виза
+width_mm: 35
+height_mm: 45
+head_height_mm: 33
+chin_bottom_mm: 6
+background: '#F2F2F2'
+note: >
+  35×45 мм, светлый однородный фон, лицо примерно 70–80% высоты кадра. У конкретной страны визы бывают дополнительные правила — сверьте перед печатью.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18

@@ -1,0 +1,15 @@
+id: propusk-6-x-9
+name: Пропуск (6 x 9)
+width_mm: 50
+height_mm: 80
+head_height_mm: 20
+chin_bottom_mm: 54
+background: '#FFFFFF'
+note: >
+  50×80 мм. Чёрно-белая. Ориентир кадра: голова 20 мм, под подбородком 54 мм. На лист обычно кладут 2 шт. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18
+show_in_menu: false

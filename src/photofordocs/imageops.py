@@ -1,0 +1,566 @@
+"""Кадр, замена фона и коррекция. Всё считается на этой машине."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageOps
+
+from photofordocs.formats import Format
+
+
+@dataclass(frozen=True)
+class Rect:
+    left: float
+    top: float
+    width: float
+    height: float
+
+    def shifted(self, dx: float, dy: float) -> Rect:
+        return Rect(self.left + dx, self.top + dy, self.width, self.height)
+
+    def scaled_about_center(self, factor: float) -> Rect:
+        cx = self.left + self.width / 2
+        cy = self.top + self.height / 2
+        width = self.width / factor
+        height = self.height / factor
+        return Rect(cx - width / 2, cy - height / 2, width, height)
+
+
+@dataclass(frozen=True)
+class FaceBox:
+    """Прямоугольник лица в долях исходного снимка, от 0 до 1."""
+
+    x: float
+    y: float
+    w: float
+    h: float
+
+
+def open_image(path: str) -> Image.Image:
+    with Image.open(path) as raw:
+        return ImageOps.exif_transpose(raw).convert("RGB")
+
+
+def downscale(image: Image.Image, max_side: int) -> Image.Image:
+    if max(image.size) <= max_side:
+        return image
+    copy = image.copy()
+    copy.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+    return copy
+
+
+_FACE_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
+
+
+def detect_face(image: Image.Image) -> FaceBox | None:
+    """Самое крупное лицо. Модель YuNet лежит рядом с программой и работает без сети."""
+    array = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+    height, width = array.shape[:2]
+    detector = cv2.FaceDetectorYN.create(str(_FACE_MODEL), "", (width, height), score_threshold=0.6)
+    _retval, faces = detector.detect(array)
+    if faces is None or len(faces) == 0:
+        return None
+    x, y, face_w, face_h = max(faces, key=lambda item: item[2] * item[3])[:4]
+    return FaceBox(float(x) / width, float(y) / height, float(face_w) / width, float(face_h) / height)
+
+
+# Колесо мыши остаётся в этих пределах. Перекрестия задают размер точнее,
+# поэтому place_crop не обрезает зум до тройки: иначе рамка перестаёт
+# уменьшаться и уезжает.
+ZOOM_MIN = 0.05
+ZOOM_MAX = 40.0
+
+
+def place_crop(
+    image_size: tuple[int, int],
+    face: FaceBox | None,
+    fmt: Format,
+    zoom: float = 1.0,
+    shift_x: float = 0.0,
+    shift_y: float = 0.0,
+) -> Rect:
+    """Окно кадра в пикселях исходника.
+
+    zoom > 1 приближает. shift_x/shift_y — доли ширины и высоты окна:
+    положительный сдвиг уводит окно вправо и вниз.
+    """
+    width, height = image_size
+    zoom = max(ZOOM_MIN, min(zoom, ZOOM_MAX))
+    if face is None:
+        crop_h = min(height, width / fmt.aspect) / zoom
+        crop_w = crop_h * fmt.aspect
+        left = (width - crop_w) / 2
+        top = (height - crop_h) / 2
+    else:
+        # Детектор видит лоб и подбородок, макушку оцениваем выше рамки.
+        chin_y = (face.y + face.h * 0.98) * height
+        crown_y = (face.y - face.h * 0.42) * height
+        center_x = (face.x + face.w / 2) * width
+        head_px = max(chin_y - crown_y, 1.0)
+        crop_h = head_px / fmt.head_ratio / zoom
+        crop_w = crop_h * fmt.aspect
+        top = chin_y - (1.0 - fmt.chin_ratio) * crop_h
+        left = center_x - crop_w / 2
+    left += shift_x * crop_w
+    top += shift_y * crop_h
+    return Rect(left, top, crop_w, crop_h)
+
+
+def guide_ratios(fmt: Format, eye_t: float = 0.55) -> tuple[float, float, float]:
+    """Доли макушки, глаз и подбородка внутри рамки.
+
+    Как в трёхточечном кадре 4.54: масштаб — это расстояние глаза–подбородок,
+    делённое на лицевую высоту формата. Поля над макушкой и под подбородком
+    умножаются на этот масштаб. На линии глаз формата (0.55) доли совпадают
+    с полями формата. Сдвиг глаз меняет поля, и рамка меняет высоту.
+    """
+    eye_t = min(0.9, max(0.1, eye_t))
+    face_mm = max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    overhead = fmt.height_mm * fmt.crown_ratio
+    under = fmt.chin_bottom_mm
+    scale_per_head = (1.0 - eye_t) / face_mm
+    span = 1.0 + (overhead + under) * scale_per_head
+    crown = overhead * scale_per_head / span
+    chin = (overhead * scale_per_head + 1.0) / span
+    eyes = (overhead * scale_per_head + eye_t) / span
+    return crown, eyes, chin
+
+
+def frame_points(
+    crop: Rect,
+    fmt: Format,
+    angle: float = 0.0,
+    eye_t: float = 0.55,
+) -> dict[str, tuple[float, float]]:
+    """Макушка, глаза и подбородок в пикселях исходника. Угол — наклон рамки по часовой.
+
+    eye_t — доля глаз на отрезке от макушки к подбородку.
+    """
+    cx = crop.left + crop.width / 2
+    cy = crop.top + crop.height / 2
+    rad = math.radians(angle)
+    s, co = math.sin(rad), math.cos(rad)
+
+    def at(local_y: float) -> tuple[float, float]:
+        return (cx - local_y * s, cy + local_y * co)
+
+    height = crop.height
+    crown_r, eye_r, chin_r = guide_ratios(fmt, eye_t)
+    return {
+        "crown": at((crown_r - 0.5) * height),
+        "eyes": at((eye_r - 0.5) * height),
+        "chin": at((chin_r - 0.5) * height),
+    }
+
+
+def move_middle(
+    crown: tuple[float, float],
+    chin: tuple[float, float],
+    proposal: tuple[float, float],
+    allow_rotate: bool,
+) -> tuple[tuple[float, float], tuple[float, float], float]:
+    """Средняя точка остаётся на отрезке макушка–подбородок, не ближе 10% к концам.
+
+    Без поворота прямая вертикальна и едет за горизонтальным сдвигом точки.
+    С поворотом концы стоят, точка проецируется на прямую между ними.
+    """
+    ax, ay = crown
+    bx, by = chin
+    px, py = proposal
+    if not allow_rotate:
+        ax = bx = px
+        span = by - ay
+        fraction = 0.55 if abs(span) < 1e-6 else (py - ay) / span
+    else:
+        vx, vy = bx - ax, by - ay
+        span2 = vx * vx + vy * vy
+        fraction = 0.55 if span2 < 1e-6 else ((px - ax) * vx + (py - ay) * vy) / span2
+    fraction = min(0.9, max(0.1, fraction))
+    return (ax, ay), (bx, by), fraction
+
+
+def pose_from_ends(
+    fmt: Format,
+    crown: tuple[float, float],
+    chin: tuple[float, float],
+    allow_rotate: bool,
+    eye_t: float = 0.55,
+) -> tuple[float, float, float, float]:
+    """Прямоугольник рамки: левый край, верх, высота, угол.
+
+    Высота — расстояние макушка–подбородок плюс поля, умноженные на масштаб
+    лица. Масштаб растёт, когда глаза уходят от подбородка.
+    """
+    if not allow_rotate:
+        angle = 0.0
+    else:
+        angle = math.degrees(math.atan2(-(chin[0] - crown[0]), chin[1] - crown[1]))
+    dist = max(math.hypot(chin[0] - crown[0], chin[1] - crown[1]), 8.0)
+    eye_t = min(0.9, max(0.1, eye_t))
+    face_mm = max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    scale = dist * (1.0 - eye_t) / face_mm
+    overhead = fmt.height_mm * fmt.crown_ratio
+    crop_h = dist + (overhead + fmt.chin_bottom_mm) * scale
+    crop_w = crop_h * fmt.aspect
+    rad = math.radians(angle)
+    unit = (-math.sin(rad), math.cos(rad))
+    crown_r, _eyes, _chin = guide_ratios(fmt, eye_t)
+    local_crown = (crown_r - 0.5) * crop_h
+    cx = crown[0] - local_crown * unit[0]
+    cy = crown[1] - local_crown * unit[1]
+    return cx - crop_w / 2, cy - crop_h / 2, crop_h, angle
+
+
+def zoom_shift_for_box(
+    image_size: tuple[int, int],
+    face: FaceBox | None,
+    fmt: Format,
+    left: float,
+    top: float,
+    crop_h: float,
+) -> tuple[float, float, float]:
+    """Подбирает zoom и сдвиг так, чтобы окно place_crop совпало с заданным прямоугольником."""
+    base = place_crop(image_size, face, fmt, 1.0, 0.0, 0.0)
+    zoom = max(ZOOM_MIN, min(base.height / max(crop_h, 1.0), ZOOM_MAX))
+    placed = place_crop(image_size, face, fmt, zoom, 0.0, 0.0)
+    shift_x = (left - placed.left) / placed.width if placed.width else 0.0
+    shift_y = (top - placed.top) / placed.height if placed.height else 0.0
+    return zoom, shift_x, shift_y
+
+
+def contain_guides(
+    image_size: tuple[int, int],
+    face: FaceBox | None,
+    fmt: Format,
+    zoom: float,
+    shift_x: float,
+    shift_y: float,
+    angle: float = 0.0,
+    eye_t: float = 0.55,
+) -> tuple[float, float]:
+    """Сдвигает рамку так, чтобы макушка, глаза и подбородок остались на снимке."""
+    width, height = image_size
+    crop = place_crop(image_size, face, fmt, zoom, shift_x, shift_y)
+    points = list(frame_points(crop, fmt, angle, eye_t).values())
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    dx = _nudge_span(min(xs), max(xs), width - 1)
+    dy = _nudge_span(min(ys), max(ys), height - 1)
+    if crop.width:
+        shift_x += dx / crop.width
+    if crop.height:
+        shift_y += dy / crop.height
+    return shift_x, shift_y
+
+
+def _nudge_span(low: float, high: float, limit: float) -> float:
+    if high - low >= limit:
+        return (limit - (low + high)) / 2
+    delta = 0.0
+    if low + delta < 0:
+        delta = -low
+    if high + delta > limit:
+        delta = limit - high
+    return delta
+
+
+def hex_to_rgb(value: str) -> tuple[int, int, int]:
+    text = value.strip().lstrip("#")
+    if len(text) != 6:
+        return (255, 255, 255)
+    return tuple(int(text[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
+
+
+def replace_background(image: Image.Image, target: tuple[int, int, int], tolerance: float) -> Image.Image:
+    """Красит фон, который цветом близок к краям и связан с ними.
+
+    Человек в центре остаётся. Белая рубашка на белом фоне может пострадать —
+    для этого есть допуск и выключатель.
+    """
+    source = np.asarray(image.convert("RGB"))
+    height, width = source.shape[:2]
+    if height < 2 or width < 2 or tolerance <= 0:
+        return image
+    border = np.concatenate(
+        [source[0, :, :], source[-1, :, :], source[:, 0, :], source[:, -1, :]],
+        axis=0,
+    ).astype(np.float32)
+    median = np.median(border, axis=0)
+    distance = np.linalg.norm(source.astype(np.float32) - median, axis=2)
+    similar = (distance <= tolerance).astype(np.uint8)
+    count, labels = cv2.connectedComponents(similar, connectivity=8)
+    if count <= 1:
+        return image
+    edge_labels = np.unique(
+        np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])
+    )
+    edge_labels = edge_labels[edge_labels != 0]
+    if edge_labels.size == 0:
+        return image
+    mask = np.isin(labels, edge_labels).astype(np.uint8) * 255
+    # Закрываем дырки фона и захватываем цветную кромку на границе волос и плеч.
+    radius = max(1, round(min(height, width) / 350))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    expanded = cv2.dilate(mask, kernel)
+    person = np.where(expanded == 0, np.uint8(255), np.uint8(0))
+    distance = cv2.distanceTransform(person, cv2.DIST_L2, 3)
+    alpha = np.clip(1.0 - distance / max(radius, 1), 0.0, 1.0)
+    alpha[expanded > 0] = 1.0
+    alpha = alpha[..., None]
+    painted = source.astype(np.float32) * (1.0 - alpha) + np.array(target, dtype=np.float32) * alpha
+    return Image.fromarray(painted.astype(np.uint8), "RGB")
+
+
+def apply_tone(
+    image: Image.Image,
+    brightness: float,
+    contrast: float,
+    grayscale: bool,
+    gamma: float = 0.0,
+    saturation: float = 0.0,
+    sharpness: float = 0.0,
+    black_point: float = 0.0,
+    white_point: float = 255.0,
+    balance: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None = None,
+) -> Image.Image:
+    """Ползунки яркости и цвета в диапазоне −100…100. Ноль оставляет снимок как есть.
+
+    balance — три тройки (голубой, пурпурный, жёлтый) для теней, полутонов и бликов.
+    """
+    array = np.asarray(image.convert("RGB")).astype(np.float32)
+    black = min(black_point, white_point - 1)
+    white = max(white_point, black + 1)
+    array = (array - black) / (white - black) * 255.0
+    contrast_gain = (contrast + 100) / 100
+    array = (array - 128.0) * contrast_gain + 128.0 + brightness / 100 * 255
+    gamma_power = 2 ** (-gamma / 100)
+    array = np.power(np.clip(array, 0, 255) / 255.0, gamma_power) * 255.0
+    if balance is not None:
+        luma = np.clip(array.mean(axis=2, keepdims=True) / 255.0, 0, 1)
+        shadow_w = np.clip(1 - luma * 2, 0, 1)
+        high_w = np.clip(luma * 2 - 1, 0, 1)
+        mid_w = np.clip(1 - shadow_w - high_w, 0, 1)
+        shift = np.zeros_like(array)
+        for weight, (cyan, magenta, yellow) in zip((shadow_w, mid_w, high_w), balance, strict=True):
+            shift[..., 0] += weight[..., 0] * (-cyan)
+            shift[..., 1] += weight[..., 0] * (-magenta)
+            shift[..., 2] += weight[..., 0] * (-yellow)
+        array += shift
+    gray = array.mean(axis=2, keepdims=True)
+    sat = (saturation + 100) / 100
+    array = gray + (array - gray) * sat
+    array = np.clip(array, 0, 255).astype(np.uint8)
+    if sharpness:
+        blurred = cv2.GaussianBlur(array, (0, 0), 1.2)
+        amount = sharpness / 100
+        array = np.clip(array.astype(np.float32) + (array.astype(np.float32) - blurred) * amount, 0, 255).astype(np.uint8)
+    result = Image.fromarray(array, "RGB")
+    if grayscale:
+        result = ImageOps.grayscale(result).convert("RGB")
+    return result
+
+
+def histogram(image: Image.Image, channel: str = "luma", clip_peaks: bool = False) -> list[int]:
+    array = np.asarray(image.convert("RGB"))
+    if channel == "red":
+        data = array[:, :, 0]
+    elif channel == "green":
+        data = array[:, :, 1]
+    elif channel == "blue":
+        data = array[:, :, 2]
+    else:
+        data = array.mean(axis=2)
+    counts, _edges = np.histogram(data, bins=256, range=(0, 255))
+    values = [int(item) for item in counts]
+    if clip_peaks and values:
+        cap = max(1, int(sorted(values)[int(len(values) * 0.98)]))
+        values = [min(item, cap) for item in values]
+    return values
+
+
+def resolve_corner(fmt: Format, mode: str) -> tuple[int, int, float, float]:
+    """Положение, вид и радиусы уголка в миллиметрах.
+
+    Биты положения, как флажки формата: 1 — верхний левый, 2 — нижний левый,
+    4 — верхний правый, 8 — нижний правый. «Слева» и «справа» в названиях
+    форматов — это нижние углы. Вид 0 — прямой (четверть ромба, треугольник),
+    2 — круглый (четверть круга из самого угла). Если у формата уголка нет,
+    ручной выбор берёт стандартные 18×18 мм.
+    """
+    standard_x = fmt.corner_rx_mm if fmt.corner_rx_mm > 0 else 18.0
+    standard_y = fmt.corner_ry_mm if fmt.corner_ry_mm > 0 else 18.0
+    manual = {
+        "straight-left": (2, 0),
+        "straight-right": (8, 0),
+        "round-left": (2, 2),
+        "round-right": (8, 2),
+    }
+    if mode in manual:
+        placement, kind = manual[mode]
+        return placement, kind, standard_x, standard_y
+    if mode in {"", "format"} and fmt.have_corner and fmt.corner_placement:
+        return fmt.corner_placement, fmt.corner_kind, standard_x, standard_y
+    return 0, 0, standard_x, standard_y
+
+
+def apply_corner(
+    image: Image.Image,
+    placement: int,
+    kind: int,
+    rx_px: int,
+    ry_px: int,
+    fill: tuple[int, int, int] = (255, 255, 255),
+) -> Image.Image:
+    if placement == 0 or rx_px <= 0 or ry_px <= 0:
+        return image
+    result = image.convert("RGB")
+    width, height = result.size
+    rx = min(rx_px, width)
+    ry = min(ry_px, height)
+    mask = Image.new("L", result.size, 255)
+    draw = ImageDraw.Draw(mask)
+    # 1 верх-лево, 2 низ-лево, 4 верх-право, 8 низ-право.
+    corners = {
+        "tl": (0, 0),
+        "bl": (0, height),
+        "tr": (width, 0),
+        "br": (width, height),
+    }
+    spots = []
+    if placement & 1:
+        spots.append("tl")
+    if placement & 2:
+        spots.append("bl")
+    if placement & 4:
+        spots.append("tr")
+    if placement & 8:
+        spots.append("br")
+    for spot in spots:
+        cx, cy = corners[spot]
+        sx, sy = _corner_inward(spot)
+        if kind == 0:
+            # Ромб с центром в углу: в кадре остаётся треугольник.
+            draw.polygon([(cx, cy), (cx + sx * rx, cy), (cx, cy + sy * ry)], fill=0)
+        elif kind in {1, 4}:
+            # Центр круга внутри кадра: дуга срезает внешний колпачок угла.
+            box = (min(cx, cx + sx * rx), min(cy, cy + sy * ry), max(cx, cx + sx * rx), max(cy, cy + sy * ry))
+            draw.rectangle(box, fill=0)
+            ix, iy = cx + sx * rx, cy + sy * ry
+            draw.ellipse((ix - rx, iy - ry, ix + rx, iy + ry), fill=255)
+        else:
+            # Круг из самого угла: в кадре остаётся четверть круга.
+            draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=0)
+    plate = Image.new("RGB", result.size, fill)
+    return Image.composite(result, plate, mask)
+
+
+def _corner_inward(spot: str) -> tuple[int, int]:
+    """Куда от угла идти внутрь кадра: вправо/влево и вниз/вверх."""
+    return {"tl": (1, 1), "tr": (-1, 1), "bl": (1, -1), "br": (-1, -1)}[spot]
+
+
+def paste_clothes(image: Image.Image, clothes: Image.Image) -> Image.Image:
+    """Кладёт PNG одежды на нижнюю часть кадра. Прозрачность одежды сохраняется."""
+    base = image.convert("RGBA")
+    shirt = clothes.convert("RGBA")
+    target_w = int(base.width * 0.92)
+    scale = target_w / shirt.width
+    shirt = shirt.resize((target_w, max(1, int(shirt.height * scale))), Image.Resampling.LANCZOS)
+    x = (base.width - shirt.width) // 2
+    y = base.height - shirt.height - int(base.height * 0.02)
+    base.alpha_composite(shirt, (x, max(0, y)))
+    return base.convert("RGB")
+
+
+def render_crop(
+    image: Image.Image,
+    crop: Rect,
+    out_size: tuple[int, int],
+    fill: tuple[int, int, int],
+    angle: float = 0.0,
+) -> Image.Image:
+    out_w, out_h = out_size
+    # Обратное отображение: пиксель результата -> пиксель исходника.
+    # Угол по часовой стрелке крутит окно вокруг его центра.
+    if abs(angle) < 1e-6:
+        matrix = (
+            crop.width / out_w,
+            0.0,
+            crop.left,
+            0.0,
+            crop.height / out_h,
+            crop.top,
+        )
+    else:
+        rad = math.radians(angle)
+        s, co = math.sin(rad), math.cos(rad)
+        cx = crop.left + crop.width / 2
+        cy = crop.top + crop.height / 2
+        matrix = (
+            crop.width / out_w * co,
+            -crop.height / out_h * s,
+            cx - crop.width / 2 * co + crop.height / 2 * s,
+            crop.width / out_w * s,
+            crop.height / out_h * co,
+            cy - crop.width / 2 * s - crop.height / 2 * co,
+        )
+    return image.transform(out_size, Image.Transform.AFFINE, matrix, resample=Image.Resampling.BICUBIC, fillcolor=fill)
+
+
+def photo_pixels(fmt: Format, dpi: int) -> tuple[int, int]:
+    return (
+        max(1, round(fmt.width_mm / 25.4 * dpi)),
+        max(1, round(fmt.height_mm / 25.4 * dpi)),
+    )
+
+
+def render_photo(
+    image: Image.Image,
+    crop: Rect,
+    fmt: Format,
+    dpi: int,
+    *,
+    replace: bool,
+    tolerance: float,
+    brightness: float,
+    contrast: float,
+    grayscale: bool,
+    background: str | None = None,
+    gamma: float = 0.0,
+    saturation: float = 0.0,
+    sharpness: float = 0.0,
+    black_point: float = 0.0,
+    white_point: float = 255.0,
+    balance: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None = None,
+    corner: str = "none",
+    clothes: Image.Image | None = None,
+    angle: float = 0.0,
+) -> Image.Image:
+    fill = hex_to_rgb(background or fmt.background)
+    prepared = replace_background(image, fill, tolerance) if replace else image
+    size = photo_pixels(fmt, dpi)
+    cropped = render_crop(prepared, crop, size, fill, angle)
+    toned = apply_tone(
+        cropped,
+        brightness,
+        contrast,
+        grayscale,
+        gamma,
+        saturation,
+        sharpness,
+        black_point,
+        white_point,
+        balance,
+    )
+    if clothes is not None and not grayscale:
+        toned = paste_clothes(toned, clothes)
+    placement, kind, rx_mm, ry_mm = resolve_corner(fmt, corner)
+    rx_px = max(1, round(rx_mm / fmt.width_mm * size[0])) if fmt.width_mm else 1
+    ry_px = max(1, round(ry_mm / fmt.height_mm * size[1])) if fmt.height_mm else 1
+    return apply_corner(toned, placement, kind, rx_px, ry_px, fill)

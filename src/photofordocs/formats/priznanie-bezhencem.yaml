@@ -1,0 +1,14 @@
+id: priznanie-bezhencem
+name: Признание беженцем
+width_mm: 35
+height_mm: 45
+head_height_mm: 34
+chin_bottom_mm: 7
+background: '#FFFFFF'
+note: >
+  35×45 мм. Цветная. Ориентир кадра: голова 34 мм, под подбородком 7 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 2
+corner_rx_mm: 18
+corner_ry_mm: 18

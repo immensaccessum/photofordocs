@@ -1,0 +1,15 @@
+id: viza-finlyandiya-gollandiya
+name: Виза Финляндия, Голландия
+width_mm: 36
+height_mm: 47
+head_height_mm: 30
+chin_bottom_mm: 13
+background: '#FFFFFF'
+note: >
+  36×47 мм. Цветная. Ориентир кадра: голова 30 мм, под подбородком 13 мм. Это рабочий ориентир по открытому требованию к бланку. Перед редкой формой сверьте размер.
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18
+corner_ry_mm: 18
+show_in_menu: false
