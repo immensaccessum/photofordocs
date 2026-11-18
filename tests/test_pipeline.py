@@ -9,9 +9,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from photofordocs.formats import import_photolab_file, load_formats, parse_photolab_formats
 from photofordocs.imageops import (
+    format_eye_t,
+    guide_ratios,
     apply_corner,
     resolve_corner,
     FaceBox,
+    head_pose_pixels,
     Rect,
     frame_points,
     place_crop,
@@ -95,6 +98,33 @@ CornerRadiusY=18
                 catalog.USER_DIR = previous_dir
                 catalog.ORDER_PATH = previous_order
 
+    def test_electronic_format_converts_short_pixel_margins(self) -> None:
+        text = """
+[Формат]
+Kind=1
+Name=Вод.удост.(национальные, электр)
+Width=496
+Height=709
+FaceHeight=142
+OverHeadHeight=40
+UnderHeadHeight=126
+isTwoPointsFrame=1
+OverHeadHeight2=47
+DPI=600
+Ext=.jp_50
+"""
+        fmt = parse_photolab_formats(text)[0]
+        self.assertAlmostEqual(fmt.width_mm, 21.0, places=2)
+        self.assertAlmostEqual(fmt.height_mm, 30.01, places=2)
+        self.assertAlmostEqual(fmt.chin_bottom_mm, 5.33, places=2)
+        self.assertAlmostEqual(fmt.head_height_mm, 22.99, places=2)
+        self.assertAlmostEqual(fmt.face_height_mm, 6.01, places=2)
+        crown, eyes, chin = guide_ratios(fmt, format_eye_t(fmt))
+        self.assertAlmostEqual(crown, fmt.crown_ratio, places=2)
+        self.assertAlmostEqual(chin, 1.0 - fmt.chin_ratio, places=2)
+        self.assertAlmostEqual(chin - eyes, fmt.face_height_mm / fmt.height_mm, places=2)
+        self.assertGreater(fmt.head_ratio, 0.7)
+
 
 class CropTest(unittest.TestCase):
     def test_head_lands_on_guides(self) -> None:
@@ -103,12 +133,33 @@ class CropTest(unittest.TestCase):
         crop = place_crop((1000, 1200), face, fmt)
         self.assertAlmostEqual(crop.width / crop.height, fmt.aspect, places=3)
         height = 1200
-        chin_y = (face.y + face.h * 0.98) * height
-        crown_y = (face.y - face.h * 0.42) * height
+        crown_y, _eye_y, chin_y, _ = head_pose_pixels(face, 1000, height, fmt)
         head_frac = (chin_y - crown_y) / crop.height
         chin_gap = (crop.top + crop.height - chin_y) / crop.height
         self.assertAlmostEqual(head_frac, fmt.head_ratio, places=3)
         self.assertAlmostEqual(chin_gap, fmt.chin_ratio, places=3)
+
+    def test_landmark_head_lands_on_guides(self) -> None:
+        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        face = FaceBox(
+            0.35,
+            0.22,
+            0.30,
+            0.42,
+            eyes_x=0.50,
+            eyes_y=0.47,
+            mouth_y=0.58,
+        )
+        size = (1000, 1200)
+        crop = place_crop(size, face, fmt)
+        crown_y, eye_y, chin_y, _ = head_pose_pixels(face, *size, fmt)
+        head_frac = (chin_y - crown_y) / crop.height
+        chin_gap = (crop.top + crop.height - chin_y) / crop.height
+        self.assertAlmostEqual(head_frac, fmt.head_ratio, places=2)
+        self.assertAlmostEqual(chin_gap, fmt.chin_ratio, places=2)
+        eye_line = (eye_y - crop.top) / crop.height
+        self.assertGreater(eye_line, 0.35)
+        self.assertLess(eye_line, 0.75)
 
     def test_handles_resize_shift_and_tilt(self) -> None:
         fmt = next(item for item in load_formats() if item.id == "passport-rf")
@@ -271,10 +322,37 @@ class ReadyFolderTest(unittest.TestCase):
             stems = {source.stem, neighbor.stem}
             self.assertTrue(ready_belongs(source, photo.name, stems))
             self.assertFalse(ready_belongs(source, other.name, stems))
-            records = read_ready(source, stems)
+            records = read_ready(source, stems, names={})
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["format_id"], "passport-rf")
             self.assertEqual(records[0]["name"], "Паспорт РФ")
+
+    def test_original_ready_file_is_attached_to_the_source(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            month = Path(folder) / "11.2026"
+            inner = month / "11.2026"
+            inner.mkdir(parents=True)
+            source = inner / "18.11 (1).png"
+            neighbor = inner / "18.11 (1) 1.jpg"
+            source.write_bytes(b"")
+            neighbor.write_bytes(b"")
+            ready = month / "Ready"
+            ready.mkdir()
+            (ready / "18.11 (1).jp_41~p").write_bytes(b"jpeg")
+            (ready / "18.11 (1) 1.jp_201").write_bytes(b"jpeg")
+            (ready / "чужой.jp_41~p").write_bytes(b"jpeg")
+            stems = {source.stem, neighbor.stem}
+            names = {"jp_41": "Паспорт РФ (2013)", "jp_201": "3 х 4 цветная"}
+            self.assertTrue(ready_belongs(source, "18.11 (1).jp_41~p", stems))
+            self.assertFalse(ready_belongs(source, "18.11 (1) 1.jp_201", stems))
+            records = read_ready(source, stems, names)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["name"], "Паспорт РФ (2013)")
+            self.assertTrue(records[0]["printed"])
+            self.assertEqual(records[0]["format_id"], "jp_41")
+            other = read_ready(neighbor, stems, names)
+            self.assertEqual(other[0]["name"], "3 х 4 цветная")
+            self.assertFalse(other[0]["printed"])
 
     def test_format_corner_is_a_real_cut_not_a_speck(self) -> None:
         fmt = next(item for item in load_formats() if item.id == "3-x-4-levyj-ugol")

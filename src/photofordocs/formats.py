@@ -42,6 +42,9 @@ class Format:
     retouch: bool = False
     print_cx_mm: float = 0.0
     print_cy_mm: float = 0.0
+    max_file_kb: int = 0
+    file_dpi: int = 0
+    kind: int = 0
 
     @property
     def aspect(self) -> float:
@@ -135,6 +138,9 @@ def _parse(path: Path, builtin: bool) -> Format | None:
         retouch=bool(data.get("retouch", False)),
         print_cx_mm=float(data.get("print_cx_mm", 0)),
         print_cy_mm=float(data.get("print_cy_mm", 0)),
+        max_file_kb=int(data.get("max_file_kb", 0) or 0),
+        file_dpi=int(data.get("file_dpi", 0) or 0),
+        kind=int(data.get("kind", 0) or 0),
     )
 
 
@@ -230,6 +236,9 @@ def save_user_format(fmt: Format) -> Path:
         "retouch": fmt.retouch,
         "print_cx_mm": fmt.print_cx_mm,
         "print_cy_mm": fmt.print_cy_mm,
+        "max_file_kb": fmt.max_file_kb,
+        "file_dpi": fmt.file_dpi,
+        "kind": fmt.kind,
     }
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return path
@@ -290,7 +299,31 @@ def parse_photolab_formats(text: str) -> list[Format]:
     found: list[Format] = []
     used: dict[str, int] = {}
     for record in _ini_records(text):
+        record = dict(record)
         name = record["Name"]
+        kind = int(_number(record, "Kind"))
+        dpi = _number(record, "DPI", 300) or 300
+        raw_width = _number(record, "Width")
+        raw_height = _number(record, "Height")
+        pixel = kind == 1 or raw_width > 250 or raw_height > 250
+        if pixel:
+            # У электронного формата все линейные поля в пикселях, в том числе
+            # короткие: верхнее поле в 40 px — это около 1,7 мм, а не 40 мм.
+            for key in (
+                "Width",
+                "Height",
+                "OverHeadHeight",
+                "UnderHeadHeight",
+                "OverHeadHeight2",
+                "FaceHeight",
+                "CornerRadiusX",
+                "CornerRadiusY",
+                "PrintCRDX",
+                "PrintCRDY",
+            ):
+                value = _number(record, key)
+                if value > 0:
+                    record[key] = f"{value / dpi * 25.4:.2f}"
         width = _number(record, "Width")
         height = _number(record, "Height")
         if width <= 0 or height <= 0:
@@ -310,11 +343,21 @@ def parse_photolab_formats(text: str) -> list[Format]:
         head = height - top - under
         if face <= 0 or face >= head:
             face = round(head * 0.45, 2)
-        base = f"imported-{_slug(name)}"
+        extension = record.get("Ext", "").lstrip(".").lower()
+        base = extension or f"imported-{_slug(name)}"
         used[base] = used.get(base, 0) + 1
         ident = base if used[base] == 1 else f"{base}-{used[base]}"
         paper = "Глянцевая" if _number(record, "PaperKind") == 1 else "Матовая"
-        extension = record.get("Ext", "jpg").lstrip(".") or "jpg"
+        extension = extension or "jpg"
+        hotkey = record.get("HotKey", "").strip()
+        if hotkey.lower() in {"", "нет", "no"}:
+            hotkey = ""
+        limit = int(_number(record, "MaxFileSize"))
+        note = "Перенесено из справочника оригинальной программы."
+        if pixel:
+            note += f" Электронный файл {raw_width:g}×{raw_height:g} px."
+        if limit:
+            note += f" Не больше {limit} КБ."
         found.append(
             Format(
                 id=ident,
@@ -324,7 +367,7 @@ def parse_photolab_formats(text: str) -> list[Format]:
                 head_height_mm=round(head, 2),
                 chin_bottom_mm=round(under, 2),
                 background="#FFFFFF",
-                note="Перенесено из справочника оригинальной программы.",
+                note=note,
                 builtin=False,
                 have_corner=bool(int(_number(record, "HaveCorner"))),
                 corner_kind=int(_number(record, "CornerKind")),
@@ -333,7 +376,7 @@ def parse_photolab_formats(text: str) -> list[Format]:
                 corner_ry_mm=_number(record, "CornerRadiusY", _number(record, "CornerRadius", 18)) or 18,
                 show_in_menu=bool(int(_number(record, "ShowInMenu", 1))),
                 extension=extension,
-                hotkey=record.get("HotKey", ""),
+                hotkey=hotkey,
                 colored=bool(int(_number(record, "Colored"))),
                 default_count=max(1, int(_number(record, "DefaultCount", 1))),
                 place_horizontal=bool(int(_number(record, "HorizPlacement"))),
@@ -345,6 +388,9 @@ def parse_photolab_formats(text: str) -> list[Format]:
                 retouch=bool(int(_number(record, "Retouch"))),
                 print_cx_mm=_number(record, "PrintCRDX"),
                 print_cy_mm=_number(record, "PrintCRDY"),
+                max_file_kb=limit,
+                file_dpi=int(dpi),
+                kind=kind,
             )
         )
     return found

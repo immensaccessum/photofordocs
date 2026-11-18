@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -22,6 +24,7 @@ class ReadyItem:
     copies: int = 1
     corner: str = "none"
     grayscale: bool = False
+    corner_mm: float = 0.0
 
 
 @dataclass
@@ -59,7 +62,7 @@ class SheetDoc:
     custom_h: float = 150.0
     landscape: bool = False
     margin_mm: float = 4.0
-    gap_mm: float = 2.0
+    gap_mm: float = 0.0
     snap: bool = True
     grid: bool = False
     grid_mm: float = 5.0
@@ -69,6 +72,8 @@ class SheetDoc:
     margin_right_mm: float = 4.0
     margin_bottom_mm: float = 4.0
     margin_left_mm: float = 4.0
+    cut_style: str = "corners"
+    cut_length_mm: float = 3.0
 
 
 @dataclass
@@ -152,6 +157,24 @@ def split_place(doc: SheetDoc, photos: list[SheetItem]) -> tuple[list[SheetItem]
             )
         )
     return placed + keep, rest
+
+
+def center_photos(doc: SheetDoc) -> None:
+    """Ставит блок кадров по центру ширины листа, верх блока — к верхнему полю."""
+    photos = [item for item in doc.items if item.kind == "photo"]
+    if not photos:
+        return
+    width, _height = paper_mm(doc)
+    top, right, _bottom, left = sheet_edges(doc)
+    min_x = min(item.x_mm for item in photos)
+    min_y = min(item.y_mm for item in photos)
+    max_x = max(item.x_mm + item.w_mm for item in photos)
+    inner_w = width - left - right
+    dx = left + (inner_w - (max_x - min_x)) / 2 - min_x
+    dy = top - min_y
+    for item in photos:
+        item.x_mm += dx
+        item.y_mm += dy
 
 
 def _blocked(x: float, y: float, w: float, h: float, occupied: list[tuple[float, float, float, float]], gap: float) -> bool:
@@ -256,6 +279,10 @@ def autoplace(doc: SheetDoc, photos: list[SheetItem]) -> list[SheetItem]:
     return placed + keep
 
 
+# Зона захвата маленькая: кадр цепляется только когда край уже почти совпал.
+SNAP_MM = 0.4
+
+
 def snap_point(value: float, targets: list[float], limit: float) -> float:
     if not targets:
         return value
@@ -283,8 +310,8 @@ def snap_item(item: SheetItem, doc: SheetDoc, others: list[SheetItem]) -> SheetI
     return SheetItem(
         item.id,
         item.kind,
-        snap_point(item.x_mm, xs, 1.2),
-        snap_point(item.y_mm, ys, 1.2),
+        snap_point(item.x_mm, xs, SNAP_MM),
+        snap_point(item.y_mm, ys, SNAP_MM),
         item.w_mm,
         item.h_mm,
         item.ready_id,
@@ -295,14 +322,17 @@ def snap_item(item: SheetItem, doc: SheetDoc, others: list[SheetItem]) -> SheetI
 
 
 def move_selected(doc: SheetDoc, selected: set[str], dx: float, dy: float) -> SheetDoc:
+    """Сдвигает выбранные кадры одним сдвигом. Прилипает якорь, остальные едут вместе с ним."""
+    anchor = next((item for item in doc.items if item.id in selected), None)
+    if anchor is None:
+        return doc
+    still = [item for item in doc.items if item.id not in selected]
+    snapped = snap_item(anchor.moved(dx, dy), doc, still)
+    adx = snapped.x_mm - anchor.x_mm
+    ady = snapped.y_mm - anchor.y_mm
     moved = []
     for item in doc.items:
-        if item.id in selected:
-            shifted = item.moved(dx, dy)
-            shifted = snap_item(shifted, doc, doc.items)
-            moved.append(shifted)
-        else:
-            moved.append(item)
+        moved.append(item.moved(adx, ady) if item.id in selected else item)
     return SheetDoc(
         doc.paper_id,
         doc.custom_w,
@@ -319,12 +349,14 @@ def move_selected(doc: SheetDoc, selected: set[str], dx: float, dy: float) -> Sh
         doc.margin_right_mm,
         doc.margin_bottom_mm,
         doc.margin_left_mm,
+        doc.cut_style,
+        doc.cut_length_mm,
     )
 
 
-def day_folder(root: Path, when: date | None = None) -> Path:
-    stamp = (when or date.today()).isoformat()
-    folder = root / stamp
+def month_folder(root: Path) -> Path:
+    """Корень текущего месяца в архиве (archive_root в настройках)."""
+    folder = Path(root)
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
@@ -343,8 +375,93 @@ def archive_names(number: int, format_slug: str) -> tuple[str, str]:
 
 
 def ready_folder(source: Path) -> Path:
-    """Папка готовых кадров рядом с исходной фотографией, как Ready в оригинале."""
-    return source.parent / "Ready"
+    """Папка готовых кадров рядом с исходником.
+
+    Обычно это Ready в той же папке. Если снимки убраны во вложенную папку,
+    а Ready остался на уровень выше, берётся он.
+    """
+    local = source.parent / "Ready"
+    if local.is_dir():
+        return local
+    parent = source.parent.parent / "Ready"
+    if source.parent.parent != source.parent and parent.is_dir():
+        return parent
+    return local
+
+
+_PHOTOLAB_EXT = re.compile(r"\.(jp_[a-z0-9_]+|10x12)$", re.IGNORECASE)
+_FORMAT_SPECS: dict[str, tuple[str, float, float]] | None = None
+
+
+def _decode_format(raw: bytes) -> str:
+    if raw.startswith(b"\xff\xfe") or raw.startswith(b"\xfe\xff"):
+        return raw.decode("utf-16")
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1251")
+
+
+def photolab_format_specs() -> dict[str, tuple[str, float, float]]:
+    """Расширение формата оригинала: название и размер в миллиметрах."""
+    global _FORMAT_SPECS
+    if _FORMAT_SPECS is not None:
+        return _FORMAT_SPECS
+    found: dict[str, tuple[str, float, float]] = {}
+    root = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ColorRiver" / "Photolab" / "formats"
+    if root.is_dir():
+        for path in root.glob("format.*"):
+            fields: dict[str, str] = {}
+            try:
+                lines = _decode_format(path.read_bytes()).splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                fields[key.strip()] = value.strip()
+            ext = fields.get("Ext", "").lstrip(".").lower()
+            name = fields.get("Name", "")
+            try:
+                width = float(fields.get("Width", "0"))
+                height = float(fields.get("Height", "0"))
+                dpi = float(fields.get("DPI", "300") or 300)
+            except ValueError:
+                continue
+            if not ext or not name or width <= 0 or height <= 0:
+                continue
+            if width > 200 or height > 200:
+                dpi = dpi or 300
+                width = width / dpi * 25.4
+                height = height / dpi * 25.4
+            found[ext] = (name, width, height)
+    _FORMAT_SPECS = found
+    return found
+
+
+def photolab_extension_names() -> dict[str, str]:
+    """Расширение формата оригинала, например jp_41, и его название."""
+    return {ext: spec[0] for ext, spec in photolab_format_specs().items()}
+
+
+def split_ready_name(filename: str) -> tuple[str, str, bool] | None:
+    """Имя в Ready: своё «снимок.Формат.jpg» или оригинал «снимок.jp_41~p».
+
+    Возвращает тело имени, ключ формата и признак «напечатано». Хвост ~p у оригинала
+    означает, что кадр уже печатали.
+    """
+    printed = filename.lower().endswith("~p")
+    base = filename[:-2] if printed else filename
+    lower = base.lower()
+    if lower.endswith(".jpg"):
+        return base[:-4], "jpg", printed
+    match = _PHOTOLAB_EXT.search(base)
+    if match and match.end() == len(base):
+        return base[: match.start()], match.group(1).lower(), printed
+    return None
 
 
 def format_file_piece(format_name: str) -> str:
@@ -361,41 +478,56 @@ def ready_info_path(photo: Path) -> Path:
     return photo.with_name(photo.name + ".info")
 
 
+def _best_stem(filename: str, stems: set[str]) -> str | None:
+    """Самое длинное имя снимка, которым начинается файл в Ready."""
+    lowered = filename.lower()
+    best: str | None = None
+    for stem in stems:
+        prefix = stem.lower() + "."
+        if lowered.startswith(prefix) and (best is None or len(stem) > len(best)):
+            best = stem
+    return best
+
+
 def ready_belongs(source: Path, filename: str, stems: set[str]) -> bool:
     """Файл Ready относится к этому снимку, а не к соседнему с более длинным именем."""
-    if not filename.lower().endswith(".jpg"):
+    if split_ready_name(filename) is None:
         return False
-    prefix = source.stem + "."
-    if not filename.startswith(prefix):
-        return False
-    for stem in stems:
-        if stem != source.stem and filename.startswith(stem + "."):
-            return False
-    return True
+    match = _best_stem(filename, stems)
+    return match is not None and match.lower() == source.stem.lower()
 
 
-def read_ready(source: Path, stems: set[str] | None = None) -> list[dict]:
+def read_ready(source: Path, stems: set[str] | None = None, names: dict[str, str] | None = None) -> list[dict]:
     folder = ready_folder(source)
     if not folder.is_dir():
         return []
     known = stems if stems is not None else {source.stem}
+    catalog = photolab_extension_names() if names is None else names
     records = []
     for path in sorted(folder.iterdir()):
-        if not path.is_file() or not ready_belongs(source, path.name, known):
+        parsed = None if not path.is_file() else split_ready_name(path.name)
+        if parsed is None or not ready_belongs(source, path.name, known):
             continue
-        piece = path.name[len(source.stem) + 1 : -4]
+        body, key, printed = parsed
         info: dict = {}
         sidecar = ready_info_path(path)
         if sidecar.is_file():
             loaded = yaml.safe_load(sidecar.read_text(encoding="utf-8")) or {}
             if isinstance(loaded, dict):
                 info = loaded
+        if key == "jpg":
+            piece = body[len(source.stem) + 1 :] if body.lower().startswith(source.stem.lower() + ".") else body
+            title = str(info.get("name") or piece)
+            format_id = str(info.get("format_id") or piece)
+        else:
+            title = str(info.get("name") or catalog.get(key) or key)
+            format_id = str(info.get("format_id") or key)
         records.append(
             {
-                "name": str(info.get("name") or piece),
+                "name": title,
                 "path": str(path),
-                "format_id": str(info.get("format_id") or piece),
-                "printed": bool(info.get("printed")),
+                "format_id": format_id,
+                "printed": printed or bool(info.get("printed")),
             }
         )
     return records
@@ -432,7 +564,69 @@ class Settings:
     advert_text: str = ""
     default_paper: str = "10x15"
     default_landscape: bool = False
+    default_format: str = ""
     search_folder: str = ""
+    photo_base: str = ""
+    clothes_dir: str = ""
+    printer_name: str = ""
+    printers: list[str] = field(default_factory=list)
+    printer_dpi: int = 300
+    export_dpi: int = 300
+    watch_min_kb: int = 0
+    jpeg_photo: int = 92
+    jpeg_sheet: int = 92
+    margin_top_mm: float = 4.0
+    margin_right_mm: float = 4.0
+    margin_bottom_mm: float = 4.0
+    margin_left_mm: float = 4.0
+    tone_brightness: float = 0.0
+    tone_contrast: float = 0.0
+    tone_gamma: float = 0.0
+    tone_saturation: float = 0.0
+    tone_sharpness: float = 0.0
+    tone_balance: list[float] = field(default_factory=lambda: [0.0] * 9)
+    ground_threshold: float = 0.0
+    replace_background: bool = False
+    brush_px: int = 0
+    cut_style: str = "corners"
+    cut_length_mm: float = 3.0
+    ask_before_delete: bool = True
+    ask_place: bool = True
+    place_horizontal: bool = True
+    confirm_overwrite: bool = True
+    face_detect: bool = True
+    show_print_dialog: bool = True
+    clear_after_print: bool = False
+    check_margins: bool = True
+    check_overlap: bool = True
+    align_center: bool = False
+    snap: bool = True
+    show_footer: bool = False
+    show_quick_bar: bool = True
+    print_horizontal: bool = False
+    allow_rotate: bool = False
+    save_limit_size: bool = True
+    save_limit_bytes: bool = False
+    save_open_folder: bool = True
+    save_max_kb: int = 48
+    logo_place: str = "among"
+    quick_tunes: list[dict] = field(default_factory=list)
+    logo_path: str = ""
+    logo_auto: bool = False
+    email_subject: str = "Отчёт фото на документы"
+    email_ssl: bool = True
+    send_log: bool = True
+    external_save_price: float = 0.0
+    icc_apply: bool | None = None
+    sort_key: str = "name"
+    sort_reverse: bool = False
+    file_panel_width: int = 0
+    preview_height: int = 0
+    left_sizes: list[int] = field(default_factory=list)
+    currency: str = "₽"
+    auto_date_folder: bool = False
+    colors: list[dict] = field(default_factory=list)
+    retouch_koeff: float = 0.0
 
     def price_for(self, format_id: str) -> float:
         return float(self.prices.get(format_id, 0))
@@ -457,6 +651,7 @@ def load_settings() -> Settings:
         "temp_folder",
         "advert_text",
         "default_paper",
+        "default_format",
         "search_folder",
     ):
         if key in data and data[key] is not None:
@@ -467,6 +662,95 @@ def load_settings() -> Settings:
         settings.white_frame_mm = float(data["white_frame_mm"])
     settings.default_landscape = bool(data.get("default_landscape", False))
     settings.prices = {str(key): float(value) for key, value in (data.get("prices") or {}).items()}
+    for key, cast in (
+        ("photo_base", str),
+        ("clothes_dir", str),
+        ("printer_name", str),
+        ("logo_path", str),
+        ("logo_place", str),
+        ("email_subject", str),
+        ("currency", str),
+        ("cut_style", str),
+        ("sort_key", str),
+    ):
+        if data.get(key):
+            setattr(settings, key, cast(data[key]))
+    for key, cast in (
+        ("printer_dpi", int),
+        ("export_dpi", int),
+        ("watch_min_kb", int),
+        ("jpeg_photo", int),
+        ("jpeg_sheet", int),
+        ("brush_px", int),
+        ("file_panel_width", int),
+        ("preview_height", int),
+        ("save_max_kb", int),
+    ):
+        if data.get(key) is not None and data.get(key) != "":
+            setattr(settings, key, cast(data[key]))
+    for key in (
+        "margin_top_mm",
+        "margin_right_mm",
+        "margin_bottom_mm",
+        "margin_left_mm",
+        "tone_brightness",
+        "tone_contrast",
+        "tone_gamma",
+        "tone_saturation",
+        "tone_sharpness",
+        "ground_threshold",
+        "cut_length_mm",
+        "external_save_price",
+        "retouch_koeff",
+    ):
+        if data.get(key) is not None and data.get(key) != "":
+            setattr(settings, key, float(data[key]))
+    for key in (
+        "ask_before_delete",
+        "ask_place",
+        "place_horizontal",
+        "confirm_overwrite",
+        "face_detect",
+        "show_print_dialog",
+        "clear_after_print",
+        "check_margins",
+        "check_overlap",
+        "align_center",
+        "snap",
+        "show_footer",
+        "show_quick_bar",
+        "print_horizontal",
+        "allow_rotate",
+        "save_limit_size",
+        "save_limit_bytes",
+        "save_open_folder",
+        "replace_background",
+        "logo_auto",
+        "email_ssl",
+        "send_log",
+        "sort_reverse",
+    ):
+        if key in data:
+            setattr(settings, key, bool(data[key]))
+    settings.auto_date_folder = False
+    if "icc_apply" in data and data["icc_apply"] is not None:
+        settings.icc_apply = bool(data["icc_apply"])
+    balance = data.get("tone_balance")
+    if isinstance(balance, list) and balance:
+        settings.tone_balance = [float(item) for item in balance[:9]]
+        settings.tone_balance += [0.0] * (9 - len(settings.tone_balance))
+    colors = data.get("colors")
+    if isinstance(colors, list):
+        settings.colors = [item for item in colors if isinstance(item, dict)]
+    printers = data.get("printers")
+    if isinstance(printers, list):
+        settings.printers = [str(item) for item in printers if str(item).strip()]
+    sizes = data.get("left_sizes")
+    if isinstance(sizes, list) and len(sizes) == 3:
+        settings.left_sizes = [int(item) for item in sizes]
+    tunes = data.get("quick_tunes")
+    if isinstance(tunes, list):
+        settings.quick_tunes = [item for item in tunes if isinstance(item, dict) and isinstance(item.get("tone"), dict)]
     return settings
 
 
@@ -490,7 +774,68 @@ def save_settings(settings: Settings) -> None:
         "advert_text": settings.advert_text,
         "default_paper": settings.default_paper,
         "default_landscape": settings.default_landscape,
+        "default_format": settings.default_format,
         "search_folder": settings.search_folder,
+        "photo_base": settings.photo_base,
+        "clothes_dir": settings.clothes_dir,
+        "printer_name": settings.printer_name,
+        "printers": settings.printers,
+        "printer_dpi": settings.printer_dpi,
+        "export_dpi": settings.export_dpi,
+        "watch_min_kb": settings.watch_min_kb,
+        "jpeg_photo": settings.jpeg_photo,
+        "jpeg_sheet": settings.jpeg_sheet,
+        "margin_top_mm": settings.margin_top_mm,
+        "margin_right_mm": settings.margin_right_mm,
+        "margin_bottom_mm": settings.margin_bottom_mm,
+        "margin_left_mm": settings.margin_left_mm,
+        "tone_brightness": settings.tone_brightness,
+        "tone_contrast": settings.tone_contrast,
+        "tone_gamma": settings.tone_gamma,
+        "tone_saturation": settings.tone_saturation,
+        "tone_sharpness": settings.tone_sharpness,
+        "tone_balance": settings.tone_balance,
+        "ground_threshold": settings.ground_threshold,
+        "replace_background": settings.replace_background,
+        "brush_px": settings.brush_px,
+        "cut_style": settings.cut_style,
+        "cut_length_mm": settings.cut_length_mm,
+        "ask_before_delete": settings.ask_before_delete,
+        "ask_place": settings.ask_place,
+        "place_horizontal": settings.place_horizontal,
+        "confirm_overwrite": settings.confirm_overwrite,
+        "face_detect": settings.face_detect,
+        "show_print_dialog": settings.show_print_dialog,
+        "clear_after_print": settings.clear_after_print,
+        "check_margins": settings.check_margins,
+        "check_overlap": settings.check_overlap,
+        "align_center": settings.align_center,
+        "snap": settings.snap,
+        "show_footer": settings.show_footer,
+        "show_quick_bar": settings.show_quick_bar,
+        "print_horizontal": settings.print_horizontal,
+        "allow_rotate": settings.allow_rotate,
+        "save_limit_size": settings.save_limit_size,
+        "save_limit_bytes": settings.save_limit_bytes,
+        "save_open_folder": settings.save_open_folder,
+        "save_max_kb": settings.save_max_kb,
+        "logo_place": settings.logo_place,
+        "quick_tunes": settings.quick_tunes,
+        "logo_path": settings.logo_path,
+        "logo_auto": settings.logo_auto,
+        "email_subject": settings.email_subject,
+        "email_ssl": settings.email_ssl,
+        "send_log": settings.send_log,
+        "external_save_price": settings.external_save_price,
+        "icc_apply": settings.icc_apply,
+        "sort_key": settings.sort_key,
+        "sort_reverse": settings.sort_reverse,
+        "file_panel_width": settings.file_panel_width,
+        "preview_height": settings.preview_height,
+        "left_sizes": settings.left_sizes,
+        "currency": settings.currency,
+        "colors": settings.colors,
+        "retouch_koeff": settings.retouch_koeff,
     }
     SETTINGS_PATH.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
@@ -607,11 +952,15 @@ def load_scheme(path: Path, doc: SheetDoc) -> SheetDoc:
         float(data.get("margin_right_mm", data.get("margin_mm", doc.margin_right_mm))),
         float(data.get("margin_bottom_mm", data.get("margin_mm", doc.margin_bottom_mm))),
         float(data.get("margin_left_mm", data.get("margin_mm", doc.margin_left_mm))),
+        str(data.get("cut_style", doc.cut_style)),
+        float(data.get("cut_length_mm", doc.cut_length_mm)),
     )
 
 
 def send_report(settings: Settings, text: str) -> str:
     """Письмо уходит только если заданы адрес и сервер. Иначе остаётся файл отчёта."""
+    if not settings.send_log:
+        return "отчёт записан в файл"
     if not settings.email or not settings.smtp_host:
         return "письмо не отправлено: нет адреса или сервера"
     import smtplib
@@ -620,10 +969,15 @@ def send_report(settings: Settings, text: str) -> str:
     message = EmailMessage()
     message["To"] = settings.email
     message["From"] = settings.smtp_user or settings.email
-    message["Subject"] = "Отчёт фото на документы"
+    message["Subject"] = settings.email_subject or "Отчёт фото на документы"
     message.set_content(text)
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10) as smtp:
-        smtp.starttls()
+    if settings.email_ssl and settings.smtp_port == 465:
+        smtp = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=10)
+    else:
+        smtp = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=10)
+    with smtp:
+        if settings.email_ssl and settings.smtp_port != 465:
+            smtp.starttls()
         if settings.smtp_user:
             smtp.login(settings.smtp_user, settings.smtp_password)
         smtp.send_message(message)

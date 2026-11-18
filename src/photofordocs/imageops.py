@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,12 +34,90 @@ class Rect:
 
 @dataclass(frozen=True)
 class FaceBox:
-    """Прямоугольник лица в долях исходного снимка, от 0 до 1."""
+    """Лицо в долях снимка (0…1). При детекции YuNet заполняются глаза и рот."""
 
     x: float
     y: float
     w: float
     h: float
+    eyes_x: float | None = None
+    eyes_y: float | None = None
+    mouth_y: float | None = None
+
+
+_CHIN_BELOW_MOUTH = 0.52
+_CROWN_ABOVE_EYES = 0.48
+_HAIR_ABOVE_BBOX = 0.24
+_CROWN_MAX_ABOVE_BBOX = 0.32
+
+
+def head_pose_pixels(
+    face: FaceBox,
+    width: int,
+    height: int,
+    fmt: Format | None = None,
+) -> tuple[float, float, float, float]:
+    """Макушка, глаза, подбородок и центр по X в пикселях исходника."""
+    _ = fmt
+    center_x = (face.x + face.w / 2) * width
+    box_h = max(face.h * height, 1.0)
+    bbox_top = face.y * height
+    bbox_bottom = (face.y + face.h) * height
+    if face.eyes_y is not None and face.mouth_y is not None:
+        eye_y = float(face.eyes_y) * height
+        if face.eyes_x is not None:
+            center_x = float(face.eyes_x) * width
+        mouth_y = float(face.mouth_y) * height
+        eye_to_mouth = max(mouth_y - eye_y, 1.0)
+        chin_mouth = mouth_y + _CHIN_BELOW_MOUTH * eye_to_mouth
+        jaw_in_box = max(bbox_bottom - mouth_y, 1.0) / box_h
+        if jaw_in_box < 0.22:
+            chin_y = 0.45 * chin_mouth + 0.55 * bbox_bottom
+        else:
+            chin_bbox = bbox_bottom - 0.04 * box_h
+            chin_y = 0.35 * chin_mouth + 0.65 * chin_bbox
+        chin_y = min(chin_y, bbox_bottom + 0.06 * box_h)
+        eye_to_chin = max(chin_y - eye_y, 1.0)
+        crown_bbox = bbox_top - _HAIR_ABOVE_BBOX * box_h
+        crown_eyes = eye_y - _CROWN_ABOVE_EYES * eye_to_chin
+        crown_y = min(crown_bbox, crown_eyes)
+        if (
+            box_h > 280
+            and crown_bbox < bbox_top - 0.235 * box_h
+            and crown_eyes > crown_bbox + 0.12 * box_h
+        ):
+            crown_y = max(crown_bbox, 0.25 * crown_bbox + 0.75 * crown_eyes)
+        crown_highest = bbox_top - _CROWN_MAX_ABOVE_BBOX * box_h
+        crown_hairline = bbox_top - 0.07 * box_h
+        crown_y = max(crown_highest, min(crown_y, crown_hairline))
+        crown_y = max(0.0, crown_y)
+        chin_y = min(float(height - 1), max(chin_y, mouth_y + 6.0))
+        return crown_y, eye_y, chin_y, center_x
+    chin_y = (face.y + face.h * 0.98) * height
+    crown_y = (face.y - face.h * 0.42) * height
+    eye_y = (face.y + face.h * 0.40) * height
+    return crown_y, eye_y, chin_y, center_x
+
+
+def guide_ratios_from_face(
+    crop: Rect,
+    face: FaceBox,
+    image_size: tuple[int, int],
+    fmt: Format | None = None,
+) -> tuple[float, float, float] | None:
+    """Положение линий внутри рамки по YuNet — для перекрестий на экране."""
+    if face.eyes_y is None or face.mouth_y is None:
+        return None
+    width, height = image_size
+    crown_y, eye_y, chin_y, _ = head_pose_pixels(face, width, height, fmt)
+    span = max(crop.height, 1.0)
+    crown_r = (crown_y - crop.top) / span
+    eye_r = (eye_y - crop.top) / span
+    chin_r = (chin_y - crop.top) / span
+    crown_r = min(0.92, max(0.0, crown_r))
+    chin_r = min(1.0, max(0.08, chin_r))
+    eye_r = min(chin_r - 0.03, max(crown_r + 0.03, eye_r))
+    return crown_r, eye_r, chin_r
 
 
 def open_image(path: str) -> Image.Image:
@@ -58,15 +137,29 @@ _FACE_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet
 
 
 def detect_face(image: Image.Image) -> FaceBox | None:
-    """Самое крупное лицо. Модель YuNet лежит рядом с программой и работает без сети."""
+    """Самое крупное лицо. YuNet даёт рамку и пять опорных точек."""
     array = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
     height, width = array.shape[:2]
     detector = cv2.FaceDetectorYN.create(str(_FACE_MODEL), "", (width, height), score_threshold=0.6)
     _retval, faces = detector.detect(array)
     if faces is None or len(faces) == 0:
         return None
-    x, y, face_w, face_h = max(faces, key=lambda item: item[2] * item[3])[:4]
-    return FaceBox(float(x) / width, float(y) / height, float(face_w) / width, float(face_h) / height)
+    row = max(faces, key=lambda item: item[2] * item[3])
+    x, y, face_w, face_h = row[:4]
+    re_x, re_y, le_x, le_y = float(row[4]), float(row[5]), float(row[6]), float(row[7])
+    rm_y, lm_y = float(row[11]), float(row[13])
+    eyes_x = (re_x + le_x) / 2.0 / width
+    eyes_y = (re_y + le_y) / 2.0 / height
+    mouth_y = (rm_y + lm_y) / 2.0 / height
+    return FaceBox(
+        float(x) / width,
+        float(y) / height,
+        float(face_w) / width,
+        float(face_h) / height,
+        eyes_x=eyes_x,
+        eyes_y=eyes_y,
+        mouth_y=mouth_y,
+    )
 
 
 # Колесо мыши остаётся в этих пределах. Перекрестия задают размер точнее,
@@ -97,10 +190,7 @@ def place_crop(
         left = (width - crop_w) / 2
         top = (height - crop_h) / 2
     else:
-        # Детектор видит лоб и подбородок, макушку оцениваем выше рамки.
-        chin_y = (face.y + face.h * 0.98) * height
-        crown_y = (face.y - face.h * 0.42) * height
-        center_x = (face.x + face.w / 2) * width
+        crown_y, _eye_y, chin_y, center_x = head_pose_pixels(face, width, height, fmt)
         head_px = max(chin_y - crown_y, 1.0)
         crop_h = head_px / fmt.head_ratio / zoom
         crop_w = crop_h * fmt.aspect
@@ -109,6 +199,16 @@ def place_crop(
     left += shift_x * crop_w
     top += shift_y * crop_h
     return Rect(left, top, crop_w, crop_h)
+
+
+def format_eye_t(fmt: Format) -> float:
+    """Доля глаз на отрезке макушка–подбородок, при которой линии совпадают с полями формата."""
+    head = fmt.head_height_mm
+    if head <= 0.1:
+        return 0.55
+    face = fmt.face_height_mm if fmt.face_height_mm > 0 else head * 0.45
+    face = min(max(face, head * 0.1), head * 0.9)
+    return 1.0 - face / head
 
 
 def guide_ratios(fmt: Format, eye_t: float = 0.55) -> tuple[float, float, float]:
@@ -136,10 +236,12 @@ def frame_points(
     fmt: Format,
     angle: float = 0.0,
     eye_t: float = 0.55,
+    guide: tuple[float, float, float] | None = None,
 ) -> dict[str, tuple[float, float]]:
     """Макушка, глаза и подбородок в пикселях исходника. Угол — наклон рамки по часовой.
 
     eye_t — доля глаз на отрезке от макушки к подбородку.
+    guide — если передан, линии берутся с детектора, а не из шаблона формата.
     """
     cx = crop.left + crop.width / 2
     cy = crop.top + crop.height / 2
@@ -150,7 +252,10 @@ def frame_points(
         return (cx - local_y * s, cy + local_y * co)
 
     height = crop.height
-    crown_r, eye_r, chin_r = guide_ratios(fmt, eye_t)
+    if guide is not None:
+        crown_r, eye_r, chin_r = guide
+    else:
+        crown_r, eye_r, chin_r = guide_ratios(fmt, eye_t)
     return {
         "crown": at((crown_r - 0.5) * height),
         "eyes": at((eye_r - 0.5) * height),
@@ -242,11 +347,15 @@ def contain_guides(
     shift_y: float,
     angle: float = 0.0,
     eye_t: float = 0.55,
+    guide: tuple[float, float, float] | None = None,
 ) -> tuple[float, float]:
     """Сдвигает рамку так, чтобы макушка, глаза и подбородок остались на снимке."""
     width, height = image_size
     crop = place_crop(image_size, face, fmt, zoom, shift_x, shift_y)
-    points = list(frame_points(crop, fmt, angle, eye_t).values())
+    active = guide
+    if active is None and face is not None:
+        active = guide_ratios_from_face(crop, face, image_size, fmt)
+    points = list(frame_points(crop, fmt, angle, eye_t, active).values())
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
     dx = _nudge_span(min(xs), max(xs), width - 1)
@@ -276,7 +385,7 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return tuple(int(text[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
 
 
-def replace_background(image: Image.Image, target: tuple[int, int, int], tolerance: float) -> Image.Image:
+def replace_background(image: Image.Image, target: tuple[int, int, int], tolerance: float, brush: int = 0) -> Image.Image:
     """Красит фон, который цветом близок к краям и связан с ними.
 
     Человек в центре остаётся. Белая рубашка на белом фоне может пострадать —
@@ -304,7 +413,7 @@ def replace_background(image: Image.Image, target: tuple[int, int, int], toleran
         return image
     mask = np.isin(labels, edge_labels).astype(np.uint8) * 255
     # Закрываем дырки фона и захватываем цветную кромку на границе волос и плеч.
-    radius = max(1, round(min(height, width) / 350))
+    radius = max(1, round(brush * min(height, width) / 1000)) if brush > 0 else max(1, round(min(height, width) / 350))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     expanded = cv2.dilate(mask, kernel)
@@ -315,6 +424,61 @@ def replace_background(image: Image.Image, target: tuple[int, int, int], toleran
     alpha = alpha[..., None]
     painted = source.astype(np.float32) * (1.0 - alpha) + np.array(target, dtype=np.float32) * alpha
     return Image.fromarray(painted.astype(np.uint8), "RGB")
+
+
+def _tone_curve_lut(brightness: float, contrast: float, gamma: float, black_point: float, white_point: float) -> np.ndarray:
+    """Та же кривая, что раньше считалась на каждом пикселе, но на 256 значениях."""
+    ramp = np.arange(256, dtype=np.float32)
+    black = min(float(black_point), float(white_point) - 1.0)
+    white = max(float(white_point), black + 1.0)
+    ramp = (ramp - black) / (white - black) * 255.0
+    gain = (float(contrast) + 100.0) / 100.0
+    ramp = (ramp - 128.0) * gain + 128.0 + float(brightness) / 100.0 * 255.0
+    power = 2.0 ** (-float(gamma) / 100.0)
+    ramp = np.power(np.clip(ramp, 0.0, 255.0) / 255.0, power) * 255.0
+    return np.clip(ramp, 0.0, 255.0).astype(np.uint8)
+
+
+def apply_tone_array(
+    image: np.ndarray,
+    brightness: float,
+    contrast: float,
+    grayscale: bool,
+    gamma: float = 0.0,
+    saturation: float = 0.0,
+    sharpness: float = 0.0,
+    black_point: float = 0.0,
+    white_point: float = 255.0,
+    balance: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None = None,
+) -> np.ndarray:
+    """Быстрый вариант apply_tone: кривая таблицей, без прохода по полному float-кадру."""
+    lut = _tone_curve_lut(brightness, contrast, gamma, black_point, white_point)
+    out = cv2.LUT(np.ascontiguousarray(image), lut)
+    balance_on = balance is not None and any(abs(float(value)) > 1e-6 for row in balance for value in row)
+    sat_on = abs(float(saturation)) > 1e-6
+    if balance_on or sat_on:
+        work = out.astype(np.float32)
+        if balance_on:
+            luma = np.clip(work.mean(axis=2) / 255.0, 0.0, 1.0)
+            shadow_w = np.clip(1.0 - luma * 2.0, 0.0, 1.0)
+            high_w = np.clip(luma * 2.0 - 1.0, 0.0, 1.0)
+            mid_w = np.clip(1.0 - shadow_w - high_w, 0.0, 1.0)
+            shadows, mids, highs = balance
+            for index, parts in enumerate(zip(shadows, mids, highs, strict=True)):
+                work[..., index] += -(shadow_w * parts[0] + mid_w * parts[1] + high_w * parts[2])
+        if sat_on:
+            gray = work.mean(axis=2, keepdims=True)
+            sat = (float(saturation) + 100.0) / 100.0
+            work = gray + (work - gray) * sat
+        out = np.clip(work, 0.0, 255.0).astype(np.uint8)
+    if sharpness:
+        blurred = cv2.GaussianBlur(out, (0, 0), 1.2)
+        amount = float(sharpness) / 100.0
+        out = cv2.addWeighted(out, 1.0 + amount, blurred, -amount, 0.0)
+    if grayscale:
+        gray = cv2.cvtColor(out, cv2.COLOR_RGB2GRAY)
+        out = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    return out
 
 
 def apply_tone(
@@ -333,37 +497,19 @@ def apply_tone(
 
     balance — три тройки (голубой, пурпурный, жёлтый) для теней, полутонов и бликов.
     """
-    array = np.asarray(image.convert("RGB")).astype(np.float32)
-    black = min(black_point, white_point - 1)
-    white = max(white_point, black + 1)
-    array = (array - black) / (white - black) * 255.0
-    contrast_gain = (contrast + 100) / 100
-    array = (array - 128.0) * contrast_gain + 128.0 + brightness / 100 * 255
-    gamma_power = 2 ** (-gamma / 100)
-    array = np.power(np.clip(array, 0, 255) / 255.0, gamma_power) * 255.0
-    if balance is not None:
-        luma = np.clip(array.mean(axis=2, keepdims=True) / 255.0, 0, 1)
-        shadow_w = np.clip(1 - luma * 2, 0, 1)
-        high_w = np.clip(luma * 2 - 1, 0, 1)
-        mid_w = np.clip(1 - shadow_w - high_w, 0, 1)
-        shift = np.zeros_like(array)
-        for weight, (cyan, magenta, yellow) in zip((shadow_w, mid_w, high_w), balance, strict=True):
-            shift[..., 0] += weight[..., 0] * (-cyan)
-            shift[..., 1] += weight[..., 0] * (-magenta)
-            shift[..., 2] += weight[..., 0] * (-yellow)
-        array += shift
-    gray = array.mean(axis=2, keepdims=True)
-    sat = (saturation + 100) / 100
-    array = gray + (array - gray) * sat
-    array = np.clip(array, 0, 255).astype(np.uint8)
-    if sharpness:
-        blurred = cv2.GaussianBlur(array, (0, 0), 1.2)
-        amount = sharpness / 100
-        array = np.clip(array.astype(np.float32) + (array.astype(np.float32) - blurred) * amount, 0, 255).astype(np.uint8)
-    result = Image.fromarray(array, "RGB")
-    if grayscale:
-        result = ImageOps.grayscale(result).convert("RGB")
-    return result
+    array = apply_tone_array(
+        np.asarray(image.convert("RGB")),
+        brightness,
+        contrast,
+        grayscale,
+        gamma,
+        saturation,
+        sharpness,
+        black_point,
+        white_point,
+        balance,
+    )
+    return Image.fromarray(array, "RGB")
 
 
 def histogram(image: Image.Image, channel: str = "luma", clip_peaks: bool = False) -> list[int]:
@@ -484,6 +630,7 @@ def render_crop(
     out_size: tuple[int, int],
     fill: tuple[int, int, int],
     angle: float = 0.0,
+    resample: Image.Resampling = Image.Resampling.BICUBIC,
 ) -> Image.Image:
     out_w, out_h = out_size
     # Обратное отображение: пиксель результата -> пиксель исходника.
@@ -510,7 +657,7 @@ def render_crop(
             crop.height / out_h * co,
             cy - crop.width / 2 * s - crop.height / 2 * co,
         )
-    return image.transform(out_size, Image.Transform.AFFINE, matrix, resample=Image.Resampling.BICUBIC, fillcolor=fill)
+    return image.transform(out_size, Image.Transform.AFFINE, matrix, resample=resample, fillcolor=fill)
 
 
 def photo_pixels(fmt: Format, dpi: int) -> tuple[int, int]:
@@ -541,11 +688,13 @@ def render_photo(
     corner: str = "none",
     clothes: Image.Image | None = None,
     angle: float = 0.0,
+    brush: int = 0,
+    resample: Image.Resampling = Image.Resampling.BICUBIC,
 ) -> Image.Image:
     fill = hex_to_rgb(background or fmt.background)
-    prepared = replace_background(image, fill, tolerance) if replace else image
+    prepared = replace_background(image, fill, tolerance, brush) if replace else image
     size = photo_pixels(fmt, dpi)
-    cropped = render_crop(prepared, crop, size, fill, angle)
+    cropped = render_crop(prepared, crop, size, fill, angle, resample)
     toned = apply_tone(
         cropped,
         brightness,
@@ -564,3 +713,33 @@ def render_photo(
     rx_px = max(1, round(rx_mm / fmt.width_mm * size[0])) if fmt.width_mm else 1
     ry_px = max(1, round(ry_mm / fmt.height_mm * size[1])) if fmt.height_mm else 1
     return apply_corner(toned, placement, kind, rx_px, ry_px, fill)
+
+
+def write_jpeg(image: Image.Image, path: Path, dpi: int, quality: int, max_kb: int = 0) -> None:
+    """JPEG с меткой DPI. Если задан потолок в КБ, качество снижается, пока файл не влезет."""
+    picture = image.convert("RGB")
+    dpi = max(1, int(dpi))
+    quality = max(10, min(100, int(quality)))
+    path = Path(path)
+
+    def encode(level: int) -> bytes:
+        buffer = io.BytesIO()
+        picture.save(buffer, format="JPEG", quality=level, dpi=(dpi, dpi), optimize=True)
+        return buffer.getvalue()
+
+    data = encode(quality)
+    limit = max(0, int(max_kb)) * 1024
+    if limit and len(data) > limit:
+        low, high = 5, quality - 1
+        best = encode(5)
+        while low <= high:
+            mid = (low + high) // 2
+            trial = encode(mid)
+            if len(trial) <= limit:
+                best = trial
+                low = mid + 1
+            else:
+                high = mid - 1
+        data = best
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
