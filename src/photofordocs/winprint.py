@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from ctypes import wintypes
 from pathlib import Path
 
@@ -19,8 +20,8 @@ HALFTONE = 4
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 
-_winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
-_gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+_winspool = None
+_gdi = None
 
 
 class _PrinterInfo4(ctypes.Structure):
@@ -117,7 +118,16 @@ def _bind() -> None:
     _gdi.StretchDIBits.restype = ctypes.c_int
 
 
-_bind()
+def _windows() -> bool:
+    return _winspool is not None and _gdi is not None
+
+
+if sys.platform == "win32":
+    _winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+    _gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+    _bind()
+    _gdi.AbortDoc.argtypes = [wintypes.HDC]
+    _gdi.AbortDoc.restype = ctypes.c_int
 
 
 def _safe_name(name: str) -> str:
@@ -153,6 +163,8 @@ def save_devmode(name: str, data: bytes) -> None:
 
 
 def printer_names() -> list[str]:
+    if not _windows():
+        return []
     needed = wintypes.DWORD(0)
     returned = wintypes.DWORD(0)
     flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS
@@ -172,6 +184,8 @@ def printer_names() -> list[str]:
 
 
 def default_printer() -> str:
+    if not _windows():
+        return ""
     size = wintypes.DWORD(0)
     _winspool.GetDefaultPrinterW(None, ctypes.byref(size))
     if size.value <= 0:
@@ -213,11 +227,15 @@ def _properties(name: str, hwnd: int, current: bytes | None, prompt: bool) -> by
 
 def configure(name: str, hwnd: int) -> bytes | None:
     """Окно драйвера. None — оператор закрыл его, не сохранив."""
+    if not _windows():
+        return None
     return _properties(name, hwnd, load_devmode(name), True)
 
 
 def print_images(name: str, images: list[tuple[int, int, int, bytes]], copies: int) -> str | None:
     """Печатает страницы BGRA. Пустая строка ошибки значит, что принтер принял задание."""
+    if not _windows():
+        return "Печать через драйвер Windows доступна только в Windows"
     if not name:
         return "Принтер не выбран"
     if not images:
@@ -283,8 +301,3 @@ def _draw_page(hdc, width: int, height: int, stride: int, raw: bytes) -> None:
         DIB_RGB_COLORS,
         SRCCOPY,
     )
-
-
-# AbortDoc may be missing from the early bind if a printer test imports symbols only.
-_gdi.AbortDoc.argtypes = [wintypes.HDC]
-_gdi.AbortDoc.restype = ctypes.c_int
