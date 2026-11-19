@@ -469,9 +469,10 @@ def format_file_piece(format_name: str) -> str:
     return cleaned or "формат"
 
 
-def ready_photo_path(source: Path, format_name: str) -> Path:
-    """Имя как у смены расширения: «снимок.Название формата.jpg» внутри Ready."""
-    return ready_folder(source) / f"{source.stem}.{format_file_piece(format_name)}.jpg"
+def ready_photo_path(source: Path, format_id: str) -> Path:
+    """Имя готового кадра: «снимок.format_id.jpg» внутри Ready."""
+    ident = "".join(ch if ch not in '\\/:*?"<>|' else "-" for ch in format_id).strip() or "format"
+    return ready_folder(source) / f"{source.stem}.{ident}.jpg"
 
 
 def ready_info_path(photo: Path) -> Path:
@@ -497,10 +498,23 @@ def ready_belongs(source: Path, filename: str, stems: set[str]) -> bool:
     return match is not None and match.lower() == source.stem.lower()
 
 
-def read_ready(source: Path, stems: set[str] | None = None, names: dict[str, str] | None = None) -> list[dict]:
+def read_ready(
+    source: Path,
+    stems: set[str] | None = None,
+    names: dict[str, str] | None = None,
+    *,
+    alias_map: dict[str, str] | None = None,
+    formats: list | None = None,
+) -> list[dict]:
     folder = ready_folder(source)
     if not folder.is_dir():
         return []
+    from photofordocs.formats import build_alias_map, load_formats, resolve_format_id
+
+    if formats is None:
+        formats = load_formats()
+    if alias_map is None:
+        alias_map = build_alias_map(formats)
     known = stems if stems is not None else {source.stem}
     catalog = photolab_extension_names() if names is None else names
     records = []
@@ -518,10 +532,11 @@ def read_ready(source: Path, stems: set[str] | None = None, names: dict[str, str
         if key == "jpg":
             piece = body[len(source.stem) + 1 :] if body.lower().startswith(source.stem.lower() + ".") else body
             title = str(info.get("name") or piece)
-            format_id = str(info.get("format_id") or piece)
+            raw_id = str(info.get("format_id") or piece)
         else:
             title = str(info.get("name") or catalog.get(key) or key)
-            format_id = str(info.get("format_id") or key)
+            raw_id = str(info.get("format_id") or key)
+        format_id = resolve_format_id(raw_id, alias_map, formats)
         records.append(
             {
                 "name": title,

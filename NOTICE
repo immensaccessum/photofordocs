@@ -1,0 +1,21 @@
+Сторонние компоненты
+====================
+
+Код PhotoForDocs (MIT) — см. [LICENSE](LICENSE).
+
+PySide6 / Qt
+------------
+Интерфейс собран на PySide6 (The Qt Company). Qt распространяется под GNU Lesser
+General Public License (LGPL) версии 3. При распространении **собранного бинарника**
+нужно выполнить требования LGPL (в том числе уведомление и возможность заменить
+библиотеку Qt). Исходники: https://www.qt.io/download-open-source
+
+Модель детекции лица YuNet
+--------------------------
+Модель `face_detection_yunet_2023mar.onnx` из OpenCV Zoo. Подробности и лицензия:
+https://github.com/opencv/opencv_zoo/tree/master/models/face_detection_yunet
+
+Python-пакеты
+-------------
+opencv-python-headless, Pillow, PyYAML, numpy — по лицензиям соответствующих
+проектов (см. метаданные пакетов в окружении установки).

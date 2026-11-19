@@ -1,0 +1,27 @@
+id: photo-3x4-bw
+name: 3 x 4 ч/б
+width_mm: 30.0
+height_mm: 40.0
+head_height_mm: 32.0
+chin_bottom_mm: 4.0
+background: '#FFFFFF'
+note: ''
+tier: core
+legacy_ext:
+- jp_20
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18.0
+corner_ry_mm: 18.0
+show_in_menu: true
+extension: jp_20
+colored: false
+default_count: 4
+place_horizontal: true
+paper_kind: Глянцевая
+two_points: false
+overhead_mm: 4.0
+overhead2_mm: 4.0
+face_height_mm: 12.0
+retouch: false

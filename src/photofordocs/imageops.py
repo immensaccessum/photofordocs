@@ -169,6 +169,87 @@ ZOOM_MIN = 0.05
 ZOOM_MAX = 40.0
 
 
+def detected_eye_t(
+    face: FaceBox | None,
+    image_size: tuple[int, int],
+    fmt: Format,
+) -> float:
+    """Доля глаз на отрезке макушка–подбородок по YuNet (как при открытии снимка в PhotoLab)."""
+    if face is None or face.eyes_y is None:
+        return format_eye_t(fmt)
+    width, height = image_size
+    crown_y, eye_y, chin_y, _ = head_pose_pixels(face, width, height, fmt)
+    span = chin_y - crown_y
+    if span < 1.0:
+        return format_eye_t(fmt)
+    return min(0.9, max(0.1, (eye_y - crown_y) / span))
+
+
+def initial_frame_fit(
+    image_size: tuple[int, int],
+    face: FaceBox | None,
+    fmt: Format,
+    eye_t: float | None = None,
+) -> tuple[float, float, float]:
+    """Сдвиг и при необходимости zoom, чтобы кадр влез в превью.
+
+    Трёхточечный масштаб нельзя менять через деление crop_h на zoom — иначе
+    макушка и подбородок перестают сидеть на направляющих. Сначала панорама, zoom только
+    если рамка шире/выше картинки.
+    """
+    if face is None or fmt.two_points or fmt.face_height_mm <= 0:
+        return 1.0, 0.0, 0.0
+    if eye_t is None:
+        eye_t = detected_eye_t(face, image_size, fmt)
+    width, height = image_size
+    crop = place_crop(image_size, face, fmt, 1.0, 0.0, 0.0, eye_t=eye_t)
+    shift_x, shift_y = 0.0, 0.0
+    if crop.width:
+        if crop.left < 0:
+            shift_x = -crop.left / crop.width
+        elif crop.left + crop.width > width:
+            shift_x = (width - crop.left - crop.width) / crop.width
+    if crop.height:
+        if crop.top < 0:
+            shift_y = -crop.top / crop.height
+        elif crop.top + crop.height > height:
+            shift_y = (height - crop.top - crop.height) / crop.height
+    zoom = 1.0
+    fitted = place_crop(image_size, face, fmt, 1.0, shift_x, shift_y, eye_t=eye_t)
+    if fitted.height > height or fitted.width > width:
+        zoom = max(fitted.height / height, fitted.width / width, 1.0)
+        zoom = min(max(zoom, ZOOM_MIN), ZOOM_MAX)
+    return zoom, shift_x, shift_y
+
+
+def _crop_from_head_span(
+    crown_y: float,
+    chin_y: float,
+    center_x: float,
+    fmt: Format,
+    eye_t: float | None = None,
+) -> Rect:
+    """Трёхточечный кадр: макушка–подбородок + поля, как pose_from_ends при открытии снимка."""
+    head_px = max(chin_y - crown_y, 1.0)
+    if eye_t is None:
+        eye_t = format_eye_t(fmt)
+    eye_t = min(0.9, max(0.1, eye_t))
+    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    face_mm = max(face_mm, 0.1)
+    if not fmt.two_points:
+        overhead = fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
+    else:
+        overhead = fmt.height_mm * fmt.crown_ratio
+    under = fmt.crop_under_mm
+    scale = head_px * (1.0 - eye_t) / face_mm
+    crop_h = head_px + (overhead + under) * scale
+    crop_w = crop_h * fmt.aspect
+    crown_r, _eye_r, _chin_r = guide_ratios(fmt, eye_t)
+    top = crown_y - crown_r * crop_h
+    left = center_x - crop_w / 2
+    return Rect(left, top, crop_w, crop_h)
+
+
 def place_crop(
     image_size: tuple[int, int],
     face: FaceBox | None,
@@ -176,6 +257,7 @@ def place_crop(
     zoom: float = 1.0,
     shift_x: float = 0.0,
     shift_y: float = 0.0,
+    eye_t: float | None = None,
 ) -> Rect:
     """Окно кадра в пикселях исходника.
 
@@ -191,11 +273,32 @@ def place_crop(
         top = (height - crop_h) / 2
     else:
         crown_y, _eye_y, chin_y, center_x = head_pose_pixels(face, width, height, fmt)
-        head_px = max(chin_y - crown_y, 1.0)
-        crop_h = head_px / fmt.head_ratio / zoom
-        crop_w = crop_h * fmt.aspect
-        top = chin_y - (1.0 - fmt.chin_ratio) * crop_h
-        left = center_x - crop_w / 2
+        if not fmt.two_points and fmt.face_height_mm > 0:
+            if eye_t is None:
+                eye_t = format_eye_t(fmt)
+            left, top, crop_h, _angle = pose_from_ends(
+                fmt,
+                (center_x, crown_y),
+                (center_x, chin_y),
+                False,
+                eye_t,
+            )
+            crop_w = crop_h * fmt.aspect
+            if zoom != 1.0:
+                cx = left + crop_w / 2
+                cy = top + crop_h / 2
+                crop_h /= zoom
+                crop_w /= zoom
+                left = cx - crop_w / 2
+                top = cy - crop_h / 2
+        else:
+            head_px = max(chin_y - crown_y, 1.0)
+            ratio = fmt.frame_head_ratio if fmt.have_corner else fmt.head_ratio
+            crop_h = head_px / ratio / zoom
+            crop_w = crop_h * fmt.aspect
+            chin_r = fmt.crop_chin_ratio if fmt.have_corner else fmt.chin_ratio
+            top = chin_y - (1.0 - chin_r) * crop_h
+            left = center_x - crop_w / 2
     left += shift_x * crop_w
     top += shift_y * crop_h
     return Rect(left, top, crop_w, crop_h)
@@ -203,7 +306,7 @@ def place_crop(
 
 def format_eye_t(fmt: Format) -> float:
     """Доля глаз на отрезке макушка–подбородок, при которой линии совпадают с полями формата."""
-    head = fmt.head_height_mm
+    head = fmt.frame_head_height_mm
     if head <= 0.1:
         return 0.55
     face = fmt.face_height_mm if fmt.face_height_mm > 0 else head * 0.45
@@ -220,9 +323,13 @@ def guide_ratios(fmt: Format, eye_t: float = 0.55) -> tuple[float, float, float]
     с полями формата. Сдвиг глаз меняет поля, и рамка меняет высоту.
     """
     eye_t = min(0.9, max(0.1, eye_t))
-    face_mm = max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
-    overhead = fmt.height_mm * fmt.crown_ratio
-    under = fmt.chin_bottom_mm
+    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    face_mm = max(face_mm, 0.1)
+    if not fmt.two_points:
+        overhead = fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
+    else:
+        overhead = fmt.height_mm * fmt.crown_ratio
+    under = fmt.crop_under_mm
     scale_per_head = (1.0 - eye_t) / face_mm
     span = 1.0 + (overhead + under) * scale_per_head
     crown = overhead * scale_per_head / span
@@ -307,10 +414,14 @@ def pose_from_ends(
         angle = math.degrees(math.atan2(-(chin[0] - crown[0]), chin[1] - crown[1]))
     dist = max(math.hypot(chin[0] - crown[0], chin[1] - crown[1]), 8.0)
     eye_t = min(0.9, max(0.1, eye_t))
-    face_mm = max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    face_mm = max(face_mm, 0.1)
     scale = dist * (1.0 - eye_t) / face_mm
-    overhead = fmt.height_mm * fmt.crown_ratio
-    crop_h = dist + (overhead + fmt.chin_bottom_mm) * scale
+    if not fmt.two_points:
+        overhead = fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
+    else:
+        overhead = fmt.height_mm * fmt.crown_ratio
+    crop_h = dist + (overhead + fmt.crop_under_mm) * scale
     crop_w = crop_h * fmt.aspect
     rad = math.radians(angle)
     unit = (-math.sin(rad), math.cos(rad))
@@ -328,11 +439,12 @@ def zoom_shift_for_box(
     left: float,
     top: float,
     crop_h: float,
+    eye_t: float | None = None,
 ) -> tuple[float, float, float]:
     """Подбирает zoom и сдвиг так, чтобы окно place_crop совпало с заданным прямоугольником."""
-    base = place_crop(image_size, face, fmt, 1.0, 0.0, 0.0)
+    base = place_crop(image_size, face, fmt, 1.0, 0.0, 0.0, eye_t=eye_t)
     zoom = max(ZOOM_MIN, min(base.height / max(crop_h, 1.0), ZOOM_MAX))
-    placed = place_crop(image_size, face, fmt, zoom, 0.0, 0.0)
+    placed = place_crop(image_size, face, fmt, zoom, 0.0, 0.0, eye_t=eye_t)
     shift_x = (left - placed.left) / placed.width if placed.width else 0.0
     shift_y = (top - placed.top) / placed.height if placed.height else 0.0
     return zoom, shift_x, shift_y

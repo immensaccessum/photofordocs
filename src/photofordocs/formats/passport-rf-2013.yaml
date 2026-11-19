@@ -1,0 +1,27 @@
+id: passport-rf-2013
+name: Паспорт РФ (2013)
+width_mm: 35.0
+height_mm: 45.0
+head_height_mm: 34.0
+chin_bottom_mm: 9.0
+background: '#FFFFFF'
+note: ''
+tier: core
+legacy_ext:
+- jp_41
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18.0
+corner_ry_mm: 18.0
+show_in_menu: true
+extension: jp_41
+colored: true
+default_count: 4
+place_horizontal: true
+paper_kind: Матовая
+two_points: true
+overhead_mm: 2.0
+overhead2_mm: 5.0
+face_height_mm: 12.0
+retouch: false

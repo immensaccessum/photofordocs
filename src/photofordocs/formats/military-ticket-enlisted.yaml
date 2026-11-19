@@ -1,0 +1,27 @@
+id: military-ticket-enlisted
+name: Воен. билет солдата, матроса
+width_mm: 25.0
+height_mm: 35.0
+head_height_mm: 20.0
+chin_bottom_mm: 12.0
+background: '#FFFFFF'
+note: ''
+tier: core
+legacy_ext:
+- jp_44
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18.0
+corner_ry_mm: 18.0
+show_in_menu: true
+extension: jp_44
+colored: false
+default_count: 4
+place_horizontal: false
+paper_kind: Матовая
+two_points: true
+overhead_mm: 3.0
+overhead2_mm: 10.0
+face_height_mm: 9.0
+retouch: false

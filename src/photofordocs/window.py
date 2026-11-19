@@ -69,9 +69,11 @@ from photofordocs.formats import Format, delete_format, import_photolab_file, lo
 from photofordocs.imageops import (
     apply_corner,
     detect_face,
+    detected_eye_t,
     downscale,
     contain_guides,
     format_eye_t,
+    head_pose_pixels,
     guide_ratios_from_face,
     paste_clothes,
     resolve_corner,
@@ -83,6 +85,7 @@ from photofordocs.imageops import (
     ZOOM_MAX,
     ZOOM_MIN,
     apply_tone_array,
+    initial_frame_fit,
     place_crop,
     move_middle,
     pose_from_ends,
@@ -1857,14 +1860,31 @@ class MainWindow(QMainWindow):
             grid.addWidget(button, index // 2, index % 2)
         return grid
 
+    def _format_tooltip(self, fmt: Format) -> str:
+        note = (fmt.note or "").strip()
+        if not note:
+            return f"{fmt.summary()}. Без описания."
+        return f"{fmt.summary()}. {note}"
+
     def _fill_format_combo(self, box: QComboBox) -> None:
         box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         box.setMinimumContentsLength(14)
         box.blockSignals(True)
         box.clear()
         for fmt in self.formats:
-            box.addItem(f"{fmt.name}  {fmt.summary()}", fmt.id)
+            box.addItem(fmt.name, fmt.id)
+            idx = box.count() - 1
+            box.setItemData(idx, self._format_tooltip(fmt), Qt.ItemDataRole.ToolTipRole)
         box.blockSignals(False)
+
+    def _sync_format_combo_tooltip(self) -> None:
+        idx = self.format_box.currentIndex()
+        if idx < 0:
+            return
+        ident = self.format_box.currentData()
+        match = next((item for item in self.formats if item.id == ident), None)
+        if match is not None:
+            self.format_box.setToolTip(self._format_tooltip(match))
 
     def _mm_box(self, low: float, high: float, value: float) -> QDoubleSpinBox:
         box = QDoubleSpinBox()
@@ -1895,22 +1915,14 @@ class MainWindow(QMainWindow):
         box = QGroupBox("Действия")
         inner = QVBoxLayout(box)
         if not hasattr(self, "format_box"):
-            row = QHBoxLayout()
-            row.addWidget(QLabel("формат"))
             self.format_box = QComboBox()
             self._fill_format_combo(self.format_box)
-            row.addWidget(self.format_box, 1)
-            about = QPushButton("Подробнее о формате")
-            about.clicked.connect(self._about_format)
-            own = QPushButton("Свой формат")
-            own.clicked.connect(self.add_format)
+            self._sync_format_combo_tooltip()
             self.rotate_box = QCheckBox("Разрешить поворот")
             self.rotate_box.setToolTip("Точки рамки можно уводить в сторону, рамка наклоняется и остаётся прямой. Без галочки она вертикальна.")
             self.rotate_box.setChecked(self.settings.allow_rotate)
             self.rotate_box.toggled.connect(self._allow_rotate)
-            inner.addLayout(row)
-            inner.addWidget(about)
-            inner.addWidget(own)
+            inner.addWidget(self.format_box)
             inner.addWidget(self.rotate_box)
         inner.addLayout(self._action_grid())
         return box
@@ -2368,10 +2380,24 @@ class MainWindow(QMainWindow):
         self._load_format_fields()
 
     def _on_format_picked(self) -> None:
+        self._sync_format_combo_tooltip()
         self._load_format_fields()
         shot = self.current_shot()
         if shot is not None:
-            shot.eye_t = format_eye_t(self.current_format())
+            fmt = self.current_format()
+            shot.eye_t = (
+                detected_eye_t(shot.face, shot.working.size, fmt)
+                if shot.face and not fmt.two_points and fmt.face_height_mm > 0
+                else format_eye_t(fmt)
+            )
+            shot.guides_manual = False
+            if shot.face is not None:
+                shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
+                    shot.working.size, shot.face, fmt, shot.eye_t
+                )
+                self._contain(shot)
+            else:
+                shot.zoom, shot.shift_x, shot.shift_y = 1.0, 0.0, 0.0
         self.refresh()
         self._remember()
 
@@ -2431,13 +2457,29 @@ class MainWindow(QMainWindow):
     def _load_format_fields(self) -> None:
         base = next(item for item in self.formats if item.id == self.format_box.currentData())
         crown = max(0.0, base.height_mm - base.head_height_mm - base.chin_bottom_mm)
+        top_mm = base.overhead2_mm if not base.two_points and base.overhead2_mm > 0 else crown
         self._format_lock = True
         self._apply_spin_units(base)
+        show_bottom = base.two_points and not base.have_corner
+        self.fmt_bottom.setVisible(show_bottom)
+        for w in (self.fmt_width.parentWidget().findChildren(QLabel) if self.fmt_width.parentWidget() else ()):
+            if w.text().startswith("Нижн."):
+                w.setVisible(show_bottom)
+            if not base.two_points and w.text().startswith("Голова"):
+                w.setText("Лиц. часть")
+            if base.two_points and w.text().startswith("Лиц."):
+                w.setText("Голова")
         self.fmt_width.setValue(self._field_from_mm(base.width_mm, base))
         self.fmt_height.setValue(self._field_from_mm(base.height_mm, base))
-        self.fmt_top.setValue(self._field_from_mm(crown, base))
+        self.fmt_top.setValue(self._field_from_mm(top_mm, base))
         self.fmt_bottom.setValue(self._field_from_mm(base.chin_bottom_mm, base))
-        self._sync_head()
+        if base.two_points:
+            self._sync_head()
+        else:
+            face = base.face_height_mm if base.face_height_mm > 0 else base.head_height_mm * 0.45
+            self.fmt_head.blockSignals(True)
+            self.fmt_head.setValue(self._field_from_mm(face, base))
+            self.fmt_head.blockSignals(False)
         dpi = base.file_dpi if base.kind == 1 or base.max_file_kb else self.settings.export_dpi
         self.dpi_box.setValue(int(dpi or self.settings.export_dpi or EXPORT_DPI))
         self.ready_gray.setChecked(base.colored)
@@ -2455,6 +2497,10 @@ class MainWindow(QMainWindow):
     def _head_edited(self, _value=None) -> None:
         if self._format_lock:
             return
+        base = next(item for item in self.formats if item.id == self.format_box.currentData())
+        if not base.two_points:
+            self.refresh()
+            return
         bottom = self.fmt_height.value() - self.fmt_top.value() - self.fmt_head.value()
         self.fmt_bottom.blockSignals(True)
         self.fmt_bottom.setValue(max(0.5, bottom))
@@ -2464,7 +2510,9 @@ class MainWindow(QMainWindow):
     def _format_fields_edited(self, _value=None) -> None:
         if self._format_lock:
             return
-        self._sync_head()
+        base = next(item for item in self.formats if item.id == self.format_box.currentData())
+        if base.two_points:
+            self._sync_head()
         self.refresh()
 
     def _apply_retouch(self, checked: bool) -> None:
@@ -2790,12 +2838,27 @@ class MainWindow(QMainWindow):
         bottom = self._mm_from_field(self.fmt_bottom.value(), base)
         if top + bottom >= height:
             bottom = max(0.5, height - top - 1)
+        head = height - top - bottom
+        if base.two_points:
+            return replace(
+                base,
+                width_mm=width,
+                height_mm=height,
+                head_height_mm=head,
+                chin_bottom_mm=bottom,
+                overhead_mm=top,
+                corner_rx_mm=float(self.corner_radius.value()),
+                corner_ry_mm=float(self.corner_radius.value()),
+            )
+        face = self._mm_from_field(self.fmt_head.value(), base)
         return replace(
             base,
             width_mm=width,
             height_mm=height,
-            head_height_mm=height - top - bottom,
+            head_height_mm=head,
             chin_bottom_mm=bottom,
+            overhead2_mm=top,
+            face_height_mm=face,
             corner_rx_mm=float(self.corner_radius.value()),
             corner_ry_mm=float(self.corner_radius.value()),
         )
@@ -2828,7 +2891,12 @@ class MainWindow(QMainWindow):
         )
         if face is not None:
             shot = self.shots[-1]
-            shot.zoom, shot.shift_x, shot.shift_y = 1.0, 0.0, 0.0
+            fmt = self.current_format()
+            if not fmt.two_points and fmt.face_height_mm > 0:
+                shot.eye_t = detected_eye_t(face, shot.working.size, fmt)
+            shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
+                shot.working.size, shot.face, fmt, shot.eye_t
+            )
             self._contain(shot)
         self._remember_shot_file(self.shots[-1])
 
@@ -2849,8 +2917,17 @@ class MainWindow(QMainWindow):
         shot.image = image
         shot.working = downscale(image, PREVIEW_SIDE)
         shot.face = detect_face(shot.working) if self.settings.face_detect else None
-        shot.eye_t = format_eye_t(self.current_format())
+        fmt = self.current_format()
+        shot.eye_t = (
+            detected_eye_t(shot.face, shot.working.size, fmt)
+            if shot.face and not fmt.two_points and fmt.face_height_mm > 0
+            else format_eye_t(fmt)
+        )
         shot.guides_manual = False
+        if shot.face is not None:
+            shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
+                shot.working.size, shot.face, fmt, shot.eye_t
+            )
         self._bg_cache.pop(id(shot), None)
         self._live_cache.pop(id(shot), None)
         self._remember_shot_file(shot)
@@ -4069,7 +4146,15 @@ class MainWindow(QMainWindow):
         return None
 
     def _crop(self, shot: Shot):
-        return place_crop(shot.working.size, shot.face, self.current_format(), shot.zoom, shot.shift_x, shot.shift_y)
+        return place_crop(
+            shot.working.size,
+            shot.face,
+            self.current_format(),
+            shot.zoom,
+            shot.shift_x,
+            shot.shift_y,
+            eye_t=shot.eye_t,
+        )
 
     def _background(self) -> str:
         chosen = self.color_box.currentData()
@@ -4110,7 +4195,9 @@ class MainWindow(QMainWindow):
 
     def _render(self, shot: Shot, image: Image.Image, dpi: int, corner: str = "none", grayscale: bool = False, prepared: bool = False, fmt: Format | None = None) -> Image.Image:
         fmt = self.current_format() if fmt is None else fmt
-        crop = place_crop(shot.working.size, shot.face, fmt, shot.zoom, shot.shift_x, shot.shift_y)
+        crop = place_crop(
+            shot.working.size, shot.face, fmt, shot.zoom, shot.shift_x, shot.shift_y, eye_t=shot.eye_t
+        )
         scale_x = image.width / shot.working.width
         scale_y = image.height / shot.working.height
         crop = type(crop)(crop.left * scale_x, crop.top * scale_y, crop.width * scale_x, crop.height * scale_y)
@@ -4374,7 +4461,7 @@ class MainWindow(QMainWindow):
         chin = points["chin"]
         if name == "eyes":
             proposal = (points["eyes"][0] + dx, points["eyes"][1] + dy)
-            crown, chin, shot.eye_t = move_middle(crown, chin, proposal, self.allow_rotate)
+            _, _, shot.eye_t = move_middle(crown, chin, proposal, self.allow_rotate)
         elif name == "crown":
             crown = (crown[0] + dx, crown[1] + dy)
             if not self.allow_rotate:
@@ -4384,7 +4471,9 @@ class MainWindow(QMainWindow):
             if not self.allow_rotate:
                 crown = (chin[0], crown[1])
         left, top, crop_h, angle = pose_from_ends(fmt, crown, chin, self.allow_rotate, shot.eye_t)
-        shot.zoom, shot.shift_x, shot.shift_y = zoom_shift_for_box(shot.working.size, shot.face, fmt, left, top, crop_h)
+        shot.zoom, shot.shift_x, shot.shift_y = zoom_shift_for_box(
+            shot.working.size, shot.face, fmt, left, top, crop_h, shot.eye_t
+        )
         shot.angle = angle
         self._contain(shot)
         self.refresh()
@@ -4393,9 +4482,18 @@ class MainWindow(QMainWindow):
         shot = self.current_shot()
         if shot is None:
             return
-        shot.zoom, shot.shift_x, shot.shift_y, shot.angle = 1.0, 0.0, 0.0, 0.0
-        shot.eye_t = format_eye_t(self.current_format())
+        fmt = self.current_format()
+        shot.angle = 0.0
+        shot.eye_t = (
+            detected_eye_t(shot.face, shot.working.size, fmt)
+            if shot.face and not fmt.two_points and fmt.face_height_mm > 0
+            else format_eye_t(fmt)
+        )
         shot.guides_manual = False
+        shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
+            shot.working.size, shot.face, fmt, shot.eye_t
+        )
+        self._contain(shot)
         shot.brightness = shot.contrast = shot.gamma = shot.saturation = shot.sharpness = 0
         shot.black_point, shot.white_point = 0, 255
         self._load_tone(shot)

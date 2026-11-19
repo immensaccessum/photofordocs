@@ -127,8 +127,55 @@ Ext=.jp_50
 
 
 class CropTest(unittest.TestCase):
+    def test_three_point_middle_resizes_frame(self) -> None:
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-color")
+        crown = (500.0, 200.0)
+        chin = (500.0, 360.0)
+        low = pose_from_ends(fmt, crown, chin, False, 0.3)[2]
+        high = pose_from_ends(fmt, crown, chin, False, 0.75)[2]
+        self.assertGreater(low, high)
+
+    def test_corner_right_crop_matches_head_field(self) -> None:
+        color = next(item for item in load_formats() if item.id == "photo-3x4-color")
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-corner-right")
+        face = FaceBox(
+            0.35,
+            0.22,
+            0.30,
+            0.42,
+            eyes_x=0.50,
+            eyes_y=0.47,
+            mouth_y=0.58,
+        )
+        size = (1000, 1200)
+        crop = place_crop(size, face, fmt)
+        color_crop = place_crop(size, face, color)
+        crown_y, _eye_y, chin_y, _ = head_pose_pixels(face, *size, fmt)
+        self.assertAlmostEqual(crop.height, color_crop.height, delta=2.0)
+        self.assertAlmostEqual(fmt.frame_head_height_mm, color.frame_head_height_mm)
+        self.assertAlmostEqual(fmt.chin_bottom_mm, 21.0, places=1)
+        self.assertAlmostEqual(fmt.crop_under_mm, 4.0, places=1)
+
+    def test_three_point_crop_matches_head_and_chin_field(self) -> None:
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-color")
+        face = FaceBox(
+            0.35,
+            0.22,
+            0.30,
+            0.42,
+            eyes_x=0.50,
+            eyes_y=0.47,
+            mouth_y=0.58,
+        )
+        size = (1000, 1200)
+        eye_t = format_eye_t(fmt)
+        crop = place_crop(size, face, fmt, eye_t=eye_t)
+        crown_y, _eye_y, chin_y, _ = head_pose_pixels(face, *size, fmt)
+        self.assertAlmostEqual((crop.top + crop.height - chin_y) / crop.height, fmt.crop_chin_ratio, places=2)
+        self.assertAlmostEqual((chin_y - crown_y) / crop.height, fmt.frame_head_ratio, places=2)
+
     def test_head_lands_on_guides(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        fmt = next(item for item in load_formats() if item.id == "passport-rf-2013")
         face = FaceBox(0.35, 0.30, 0.30, 0.34)
         crop = place_crop((1000, 1200), face, fmt)
         self.assertAlmostEqual(crop.width / crop.height, fmt.aspect, places=3)

@@ -45,6 +45,8 @@ class Format:
     max_file_kb: int = 0
     file_dpi: int = 0
     kind: int = 0
+    legacy_ext: tuple[str, ...] = ()
+    tier: str = "extended"
 
     @property
     def aspect(self) -> float:
@@ -57,6 +59,41 @@ class Format:
     @property
     def chin_ratio(self) -> float:
         return self.chin_bottom_mm / self.height_mm
+
+    @property
+    def crop_under_mm(self) -> float:
+        """Нижнее поле в окне кадра.
+
+        В справочнике PhotoLab у форматов с уголком в INI пишут UnderHeadHeight=21 —
+        это запас под обрез уголка на листе, а не зона, которую показывают под подбородком
+        при кадрировании (там как у цветной 3×4, OverHeadHeight2).
+        """
+        if self.have_corner:
+            if self.overhead2_mm > 0:
+                return self.overhead2_mm
+            if self.overhead_mm > 0:
+                return self.overhead_mm
+        return self.chin_bottom_mm
+
+    @property
+    def crop_chin_ratio(self) -> float:
+        return self.crop_under_mm / self.height_mm
+
+    @property
+    def frame_head_height_mm(self) -> float:
+        """Высота головы в окне кадра.
+
+        У 3×4 с уголком в INI head=15 мм (40−4−21), но при кадрировании PhotoLab
+        ведёт себя как у цветной 3×4: 32 мм между макушкой и подбородком, 4 мм снизу.
+        """
+        if self.have_corner and not self.two_points:
+            top = self.overhead2_mm if self.overhead2_mm > 0 else self.height_mm * self.crown_ratio
+            return max(self.height_mm - top - self.crop_under_mm, 0.1)
+        return self.head_height_mm
+
+    @property
+    def frame_head_ratio(self) -> float:
+        return self.frame_head_height_mm / self.height_mm
 
     @property
     def crown_ratio(self) -> float:
@@ -95,7 +132,20 @@ class Format:
         return f"{shape}, {side}, {radius}"
 
 
-def _parse(path: Path, builtin: bool) -> Format | None:
+def _parse_legacy_ext(data: dict) -> tuple[str, ...]:
+    raw = data.get("legacy_ext")
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, list):
+        items = [str(item) for item in raw]
+    else:
+        return ()
+    return tuple(item.strip().lower() for item in items if str(item).strip())
+
+
+def _parse(path: Path, builtin: bool, *, default_tier: str | None = None) -> Format | None:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{path} должен быть словарём")
@@ -109,6 +159,12 @@ def _parse(path: Path, builtin: bool) -> Format | None:
         raise ValueError(f"{path}: размеры должны быть больше нуля")
     if head + chin >= height:
         raise ValueError(f"{path}: голова и поле под подбородком не умещаются в кадр")
+    tier = str(data.get("tier", default_tier or "extended"))
+    show_raw = data.get("show_in_menu")
+    if show_raw is None:
+        show_in_menu = not (builtin and tier == "extended")
+    else:
+        show_in_menu = bool(show_raw)
     return Format(
         id=str(data["id"]),
         name=str(data["name"]),
@@ -117,14 +173,14 @@ def _parse(path: Path, builtin: bool) -> Format | None:
         head_height_mm=head,
         chin_bottom_mm=chin,
         background=str(data.get("background", "#FFFFFF")),
-        note=str(data.get("note", "")).strip(),
+        note=scrub_import_note(str(data.get("note", ""))),
         builtin=builtin,
         have_corner=bool(data.get("have_corner", False)),
         corner_kind=int(data.get("corner_kind", 0)),
         corner_placement=int(data.get("corner_placement", 0)),
         corner_rx_mm=float(data.get("corner_rx_mm", 18)),
         corner_ry_mm=float(data.get("corner_ry_mm", 18)),
-        show_in_menu=bool(data.get("show_in_menu", True)),
+        show_in_menu=show_in_menu,
         extension=str(data.get("extension", "jpg")),
         hotkey=str(data.get("hotkey", "")),
         colored=bool(data.get("colored", True)),
@@ -141,24 +197,160 @@ def _parse(path: Path, builtin: bool) -> Format | None:
         max_file_kb=int(data.get("max_file_kb", 0) or 0),
         file_dpi=int(data.get("file_dpi", 0) or 0),
         kind=int(data.get("kind", 0) or 0),
+        legacy_ext=_parse_legacy_ext(data),
+        tier=tier,
     )
 
 
-_ORDER = (
-    "passport-rf",
-    "zagran",
-    "schengen",
-    "usa-visa",
-    "china-visa",
-    "photo-3x4",
+_CORE_ORDER = (
+    "passport-rf-2013",
+    "photo-3x4-color",
+    "photo-9x12-color",
+    "photo-4x6-no-corner",
+    "photo-3x4-bw",
+    "photo-3x4-corner-right",
+    "photo-45x60-no-corner",
+    "military-ticket-enlisted",
+    "photo-9x12",
+    "photo-3x4-corner-left",
 )
+
+_ORDER = _CORE_ORDER
+
+_IMPORT_NOTE_PREFIXES = (
+    "Перенесено из справочника оригинальной программы.",
+    "Импортировано из внешнего справочника (INI).",
+)
+
+
+def scrub_import_note(note: str) -> str:
+    text = (note or "").strip()
+    for prefix in _IMPORT_NOTE_PREFIXES:
+        if text == prefix:
+            return ""
+        if text.startswith(prefix):
+            return text[len(prefix) :].lstrip()
+    return text
+
+
+def _legacy_keys(fmt: Format) -> set[str]:
+    keys = {item.lower() for item in fmt.legacy_ext if item}
+    ext = fmt.extension.lstrip(".").lower()
+    if ext and ext != "jpg":
+        keys.add(ext)
+    if fmt.id.lower().startswith("jp_"):
+        keys.add(fmt.id.lower())
+    return keys
+
+
+def build_alias_map(formats: list[Format]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for fmt in formats:
+        if fmt.tier != "core":
+            continue
+        for key in _legacy_keys(fmt):
+            mapping.setdefault(key, fmt.id)
+    return mapping
+
+
+def resolve_format_id(raw: str, alias_map: dict[str, str], formats: list[Format] | None = None) -> str:
+    key = (raw or "").strip()
+    if not key:
+        return raw
+    if formats:
+        by_id = {item.id: item for item in formats}
+        if key in by_id:
+            return key
+        low = key.lower()
+        for ident in by_id:
+            if ident.lower() == low:
+                return ident
+    low = key.lower()
+    return alias_map.get(low, raw)
+
+
+def format_price(prices: dict[str, float], raw: str, formats: list[Format], alias_map: dict[str, str]) -> float:
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        item = (value or "").strip()
+        if item and item not in seen:
+            seen.add(item)
+            candidates.append(item)
+
+    add(raw)
+    add(resolve_format_id(raw, alias_map, formats))
+    matched = format_by_id_or_legacy(raw, formats, alias_map)
+    if matched is not None:
+        add(matched.id)
+        for legacy in _legacy_keys(matched):
+            add(legacy)
+    for ident in candidates:
+        if ident in prices:
+            return float(prices[ident])
+    return 0.0
+
+
+def format_by_id_or_legacy(raw: str, formats: list[Format], alias_map: dict[str, str]) -> Format | None:
+    resolved = resolve_format_id(raw, alias_map, formats)
+    by_id = {item.id: item for item in formats}
+    found = by_id.get(resolved) or by_id.get(raw)
+    if found is not None:
+        return found
+    low = raw.lower()
+    for fmt in formats:
+        if low in _legacy_keys(fmt):
+            return fmt
+    return None
+
+
+def user_has_format_profile() -> bool:
+    if not USER_DIR.exists():
+        return False
+    for path in USER_DIR.glob("*.yaml"):
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(raw, dict) and not raw.get("deleted"):
+            return True
+    return False
+
+
+def formats_for_editor(formats: list[Format], *, user_has_profile: bool | None = None) -> list[Format]:
+    """Справочник форматов: без профиля — только стартовое ядро (tier core)."""
+    if user_has_profile is None:
+        user_has_profile = user_has_format_profile()
+    if user_has_profile:
+        return list(formats)
+    return [item for item in formats if item.builtin and item.tier == "core"]
+
+
+def visible_formats(formats: list[Format], *, user_has_profile: bool | None = None) -> list[Format]:
+    if user_has_profile is None:
+        user_has_profile = user_has_format_profile()
+    if not user_has_profile:
+        return [item for item in formats if item.tier == "core" and item.show_in_menu]
+    user_legacy: set[str] = set()
+    for item in formats:
+        if not item.builtin:
+            user_legacy.update(_legacy_keys(item))
+    visible: list[Format] = []
+    for item in formats:
+        if not item.show_in_menu:
+            continue
+        if not item.builtin:
+            visible.append(item)
+            continue
+        if item.tier == "core" and _legacy_keys(item) & user_legacy:
+            continue
+        visible.append(item)
+    return visible
 
 
 def load_formats() -> list[Format]:
     found: dict[str, Format] = {}
     hidden: set[str] = set()
     for path in sorted(BUNDLED_DIR.glob("*.yaml")):
-        item = _parse(path, builtin=True)
+        item = _parse(path, builtin=True, default_tier="core")
         if item is not None:
             found[item.id] = item
     if USER_DIR.exists():
@@ -168,8 +360,11 @@ def load_formats() -> list[Format]:
                 hidden.add(str(raw.get("id", path.stem)))
                 found.pop(str(raw.get("id", path.stem)), None)
                 continue
+            raw_note = str((raw if isinstance(raw, dict) else {}).get("note", "") or "").strip()
             item = _parse(path, builtin=False)
             if item is not None:
+                if raw_note != item.note:
+                    save_user_format(item)
                 found[item.id] = item
     for ident in hidden:
         found.pop(ident, None)
@@ -199,10 +394,32 @@ def save_format_order(idents: list[str]) -> None:
 
 
 def delete_format(fmt: Format) -> None:
-    """Прячет формат. Встроенный снова не появляется, пока файл-пометка лежит в каталоге пользователя."""
-    USER_DIR.mkdir(parents=True, exist_ok=True)
+    """Свой или импортированный формат — файл в профиле удаляется. Встроенный — пометка deleted."""
     path = USER_DIR / f"{fmt.id}.yaml"
-    path.write_text(yaml.safe_dump({"id": fmt.id, "deleted": True}, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    if fmt.builtin:
+        USER_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump({"id": fmt.id, "deleted": True}, allow_unicode=True, sort_keys=False), encoding="utf-8")
+        return
+    if path.is_file():
+        path.unlink()
+
+
+def count_user_format_files() -> int:
+    if not USER_DIR.exists():
+        return 0
+    return sum(1 for path in USER_DIR.glob("*.yaml") if path.is_file())
+
+
+def clear_user_format_profile(*, reset_order: bool = True) -> int:
+    """Удаляет все yaml в профиле (импорт, свои, пометки скрытия встроенных)."""
+    removed = 0
+    if USER_DIR.exists():
+        for path in USER_DIR.glob("*.yaml"):
+            path.unlink(missing_ok=True)
+            removed += 1
+    if reset_order and ORDER_PATH.is_file():
+        ORDER_PATH.unlink(missing_ok=True)
+    return removed
 
 
 def save_user_format(fmt: Format) -> Path:
@@ -239,7 +456,10 @@ def save_user_format(fmt: Format) -> Path:
         "max_file_kb": fmt.max_file_kb,
         "file_dpi": fmt.file_dpi,
         "kind": fmt.kind,
+        "legacy_ext": list(fmt.legacy_ext) if fmt.legacy_ext else None,
+        "tier": fmt.tier,
     }
+    payload = {key: value for key, value in payload.items() if value is not None}
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return path
 
@@ -295,7 +515,7 @@ def _number(record: dict[str, str], key: str, default: float = 0.0) -> float:
 
 
 def parse_photolab_formats(text: str) -> list[Format]:
-    """Справочник formats.ini программы «Фото на документы»."""
+    """Разбор справочника форматов в формате INI."""
     found: list[Format] = []
     used: dict[str, int] = {}
     for record in _ini_records(text):
@@ -353,11 +573,13 @@ def parse_photolab_formats(text: str) -> list[Format]:
         if hotkey.lower() in {"", "нет", "no"}:
             hotkey = ""
         limit = int(_number(record, "MaxFileSize"))
-        note = "Перенесено из справочника оригинальной программы."
+        note_parts: list[str] = []
         if pixel:
-            note += f" Электронный файл {raw_width:g}×{raw_height:g} px."
+            note_parts.append(f"Электронный файл {raw_width:g}×{raw_height:g} px.")
         if limit:
-            note += f" Не больше {limit} КБ."
+            note_parts.append(f"Не больше {limit} КБ.")
+        note = ". ".join(note_parts)
+        legacy = (ident,) if ident.startswith("jp_") else ()
         found.append(
             Format(
                 id=ident,
@@ -391,6 +613,8 @@ def parse_photolab_formats(text: str) -> list[Format]:
                 max_file_kb=limit,
                 file_dpi=int(dpi),
                 kind=kind,
+                legacy_ext=legacy,
+                tier="extended",
             )
         )
     return found

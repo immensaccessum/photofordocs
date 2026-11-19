@@ -1,7 +1,6 @@
-"""Импорт файла переноса настроек PhotoLab (*.phs).
+"""Перенос настроек в архиве (*.phs): свой бандл и совместимые файлы переноса.
 
-Лицензия не читается. Адрес обновлений ColorRiver тоже не используется:
-это канал старой программы, а не рабочее место.
+Ключи лицензии из чужого архива не читаются. Каналы проверки обновлений сторонних программ не используются.
 """
 
 from __future__ import annotations
@@ -11,8 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from photofordocs.clothes import install_clothes
+from photofordocs import formats as formats_mod
 from photofordocs.formats import parse_photolab_formats, save_format_order
-from photofordocs.session import CONFIG_DIR, PAPER_MM, Settings, load_settings, save_settings
+from photofordocs import session
+from photofordocs.session import PAPER_MM, Settings, load_settings, save_settings
+
+_BUNDLE_ROOT = "photofordocs-bundle"
+_NATIVE_MARK = f"{_BUNDLE_ROOT}/settings.yaml"
 
 _SKIP_NAMES = ("license", "licence", "лиценз")
 
@@ -113,7 +117,7 @@ def _price_rubles(record: dict[str, str]) -> float:
 
 
 def read_members(path: Path) -> tuple[dict[str, dict[str, str]], str, list[tuple[str, bytes]]]:
-    """Секции PhotoLab.ini, текст форматов и слоты принтеров."""
+    """Секции ini из архива переноса, текст форматов и слоты принтеров."""
     sections: dict[str, dict[str, str]] = {}
     format_chunks: list[str] = []
     slots: list[tuple[str, bytes]] = []
@@ -197,7 +201,7 @@ def apply_settings(settings: Settings, sections: dict[str, dict[str, str]], slot
             names.append(slot_name)
     settings.printers = names
     if slots:
-        folder = CONFIG_DIR / "printers"
+        folder = session.CONFIG_DIR / "printers"
         folder.mkdir(parents=True, exist_ok=True)
         for index, (slot_name, raw) in enumerate(slots):
             safe = "".join(ch if ch not in '\\/:*?"<>|' else "_" for ch in slot_name) or f"slot-{index}"
@@ -235,7 +239,7 @@ def apply_settings(settings: Settings, sections: dict[str, dict[str, str]], slot
     if 0 < settings.ground_threshold <= 20:
         notes.append(
             f"Порог фона {settings.ground_threshold:g} переведён в чувствительность {min(90, settings.ground_threshold * 10):g}: "
-            "у оригинала другая шкала."
+            "у источника другая шкала."
         )
 
     settings.cut_style = _cut_style(work)
@@ -288,14 +292,93 @@ def apply_settings(settings: Settings, sections: dict[str, dict[str, str]], slot
     # Кадры последней рамки — положение одного снимка, а не правило для всех.
     if any(work.get(key) for key in ("FrameLeft", "TopX", "BottomX")):
         notes.append("Координаты последней рамки не применяются ко всем снимкам: это след одного кадра.")
-    notes.append("Окна линейки, гистограммы и редактора оригинала не повторяются. Ширина списка файлов и высота превью переносятся.")
-    notes.append("Проверка обновлений ColorRiver не переносится.")
+    notes.append(
+        "Окна линейки, гистограммы и внешнего редактора из предыдущей установки не повторяются. "
+        "Ширина списка файлов и высота превью переносятся."
+    )
+    notes.append("Проверка обновлений сторонней программы не переносится.")
     return notes
+
+
+def _native_bundle(path: Path) -> bool:
+    if not zipfile.is_zipfile(path):
+        return False
+    with zipfile.ZipFile(path) as archive:
+        return _NATIVE_MARK in archive.namelist()
+
+
+def export_transfer(path: Path, *, settings: bool, formats: bool) -> None:
+    if not settings and not formats:
+        raise ValueError("Отметьте, что именно сохранять.")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(f"{_BUNDLE_ROOT}/README.txt", "Перенос настроек PhotoForDocs.\n")
+        if settings and session.SETTINGS_PATH.is_file():
+            archive.write(session.SETTINGS_PATH, _NATIVE_MARK)
+            printers = session.CONFIG_DIR / "printers"
+            if printers.is_dir():
+                for item in sorted(printers.glob("*.cfg")):
+                    archive.write(item, f"{_BUNDLE_ROOT}/printers/{item.name}")
+        if formats:
+            if formats_mod.ORDER_PATH.is_file():
+                archive.write(formats_mod.ORDER_PATH, f"{_BUNDLE_ROOT}/format-order.yaml")
+            if formats_mod.USER_DIR.is_dir():
+                for item in sorted(formats_mod.USER_DIR.glob("*.yaml")):
+                    archive.write(item, f"{_BUNDLE_ROOT}/formats/{item.name}")
+
+
+def _import_native(path: Path, *, settings: bool, formats: bool) -> ImportReport:
+    report = ImportReport()
+    current = load_settings()
+    with zipfile.ZipFile(path) as archive:
+        if settings:
+            try:
+                raw = archive.read(_NATIVE_MARK)
+            except KeyError as error:
+                raise ValueError("В файле нет настроек программы.") from error
+            session.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            session.SETTINGS_PATH.write_bytes(raw)
+            current = load_settings()
+            prefix = f"{_BUNDLE_ROOT}/printers/"
+            printers = session.CONFIG_DIR / "printers"
+            for name in archive.namelist():
+                if name.startswith(prefix) and name.endswith(".cfg"):
+                    printers.mkdir(parents=True, exist_ok=True)
+                    (printers / Path(name).name).write_bytes(archive.read(name))
+            report.notes.append("Настройки программы записаны.")
+            report.notes.extend(_clothes_note(current))
+        if formats:
+            prefix = f"{_BUNDLE_ROOT}/formats/"
+            names = [name for name in archive.namelist() if name.startswith(prefix) and name.endswith(".yaml")]
+            if not names:
+                raise ValueError("В файле нет пользовательских форматов.")
+            formats_mod.USER_DIR.mkdir(parents=True, exist_ok=True)
+            count = 0
+            for name in names:
+                target = formats_mod.USER_DIR / Path(name).name
+                target.write_bytes(archive.read(name))
+                count += 1
+            order_name = f"{_BUNDLE_ROOT}/format-order.yaml"
+            if order_name in archive.namelist():
+                formats_mod.ORDER_PATH.parent.mkdir(parents=True, exist_ok=True)
+                formats_mod.ORDER_PATH.write_bytes(archive.read(order_name))
+            report.formats = count
+    if settings:
+        save_settings(current)
+    return report
+
+
+def import_transfer(path: Path, *, settings: bool = True, formats: bool = True) -> ImportReport:
+    if not settings and not formats:
+        raise ValueError("Отметьте, что именно восстанавливать.")
+    if _native_bundle(path):
+        return _import_native(path, settings=settings, formats=formats)
+    return import_phs(path, settings=settings, formats=formats)
 
 
 def import_phs(path: Path, *, settings: bool = True, formats: bool = True) -> ImportReport:
     if not zipfile.is_zipfile(path):
-        raise ValueError("Файл настроек не похож на перенос PhotoLab.")
+        raise ValueError("Файл переноса должен быть архивом (.phs).")
     sections, format_text, slots = read_members(path)
     report = ImportReport()
     current = load_settings()

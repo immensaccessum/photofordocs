@@ -1,0 +1,27 @@
+id: photo-4x6-no-corner
+name: 4 x 6 без угла
+width_mm: 40.0
+height_mm: 60.0
+head_height_mm: 51.0
+chin_bottom_mm: 4.0
+background: '#FFFFFF'
+note: ''
+tier: core
+legacy_ext:
+- jp_14
+have_corner: true
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18.0
+corner_ry_mm: 18.0
+show_in_menu: true
+extension: jp_14
+colored: true
+default_count: 4
+place_horizontal: false
+paper_kind: Глянцевая
+two_points: false
+overhead_mm: 4.0
+overhead2_mm: 5.0
+face_height_mm: 15.0
+retouch: false

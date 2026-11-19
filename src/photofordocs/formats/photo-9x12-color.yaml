@@ -1,0 +1,27 @@
+id: photo-9x12-color
+name: 9х12 цв
+width_mm: 90.0
+height_mm: 120.0
+head_height_mm: 106.0
+chin_bottom_mm: 4.0
+background: '#FFFFFF'
+note: ''
+tier: core
+legacy_ext:
+- jp_53
+have_corner: false
+corner_kind: 0
+corner_placement: 0
+corner_rx_mm: 18.0
+corner_ry_mm: 18.0
+show_in_menu: true
+extension: jp_53
+colored: true
+default_count: 1
+place_horizontal: false
+paper_kind: Глянцевая
+two_points: false
+overhead_mm: 4.0
+overhead2_mm: 10.0
+face_height_mm: 35.0
+retouch: false

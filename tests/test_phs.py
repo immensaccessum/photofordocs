@@ -92,14 +92,12 @@ class PhsImportTest(unittest.TestCase):
             previous = (
                 session.CONFIG_DIR,
                 session.SETTINGS_PATH,
-                phs.CONFIG_DIR,
                 formats.USER_DIR,
                 formats.ORDER_PATH,
                 clothes.CLOTHES_DIR,
             )
             session.CONFIG_DIR = root
             session.SETTINGS_PATH = root / "settings.yaml"
-            phs.CONFIG_DIR = root
             formats.USER_DIR = root / "formats"
             formats.ORDER_PATH = root / "format-order.yaml"
             clothes.CLOTHES_DIR = root / "clothes"
@@ -113,7 +111,6 @@ class PhsImportTest(unittest.TestCase):
                 (
                     session.CONFIG_DIR,
                     session.SETTINGS_PATH,
-                    phs.CONFIG_DIR,
                     formats.USER_DIR,
                     formats.ORDER_PATH,
                     clothes.CLOTHES_DIR,
@@ -146,6 +143,44 @@ class PhsImportTest(unittest.TestCase):
         self.assertEqual(loaded.advert_text, "")
         self.assertEqual(loaded.colors[0]["name"], "Голубой")
         self.assertEqual(report.formats, 2)
+
+    def test_native_bundle_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "cfg"
+            root.mkdir()
+            (root / "formats").mkdir()
+            path = Path(folder) / "mine.phs"
+            previous = (
+                session.CONFIG_DIR,
+                session.SETTINGS_PATH,
+                formats.USER_DIR,
+                formats.ORDER_PATH,
+            )
+            session.CONFIG_DIR = root
+            session.SETTINGS_PATH = root / "settings.yaml"
+            formats.USER_DIR = root / "formats"
+            formats.ORDER_PATH = root / "format-order.yaml"
+            try:
+                session.SETTINGS_PATH.write_text('archive_root: "D:/test"\n', encoding="utf-8")
+                (formats.USER_DIR / "custom.yaml").write_text(
+                    "id: custom\nname: Test\nwidth_mm: 35\nheight_mm: 45\n",
+                    encoding="utf-8",
+                )
+                phs.export_transfer(path, settings=True, formats=True)
+                session.SETTINGS_PATH.write_text("archive_root: ''\n", encoding="utf-8")
+                (formats.USER_DIR / "custom.yaml").unlink()
+                report = phs.import_transfer(path, settings=True, formats=True)
+                loaded = session.load_settings()
+                self.assertEqual(loaded.archive_root, "D:/test")
+                self.assertEqual(report.formats, 1)
+                self.assertTrue((formats.USER_DIR / "custom.yaml").is_file())
+            finally:
+                (
+                    session.CONFIG_DIR,
+                    session.SETTINGS_PATH,
+                    formats.USER_DIR,
+                    formats.ORDER_PATH,
+                ) = previous
 
     def test_real_transfer_file(self) -> None:
         path = Path(__file__).resolve().parents[1] / "оригинал" / "18.11.phs"
