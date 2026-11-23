@@ -16,3 +16,6 @@ dist/
 build/
 *.exe
 *.rar
+*.zip
+/*.jpg
+/*.jpeg

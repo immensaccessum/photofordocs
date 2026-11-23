@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from photofordocs.session import (
     JournalLine,
     ReadyItem,
+    Settings,
     SheetDoc,
     SheetItem,
     add_journal,
@@ -24,6 +25,7 @@ from photofordocs.session import (
     center_photos,
     sheet_edges,
     split_place,
+    startup_folder,
 )
 
 
@@ -45,6 +47,20 @@ class SheetCanvasTest(unittest.TestCase):
         first = next(item for item in moved.items if item.id == placed[0].id)
         self.assertAlmostEqual(first.x_mm, placed[0].x_mm + 3, delta=1.3)
         self.assertTrue(overflows(SheetItem("z", "photo", 90, 140, 35, 45), doc))
+
+    def test_startup_folder_is_the_one_open_at_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            archive = root / "archive"
+            last = root / "last"
+            archive.mkdir()
+            last.mkdir()
+            settings = Settings(archive_root=str(archive), last_folder=str(last))
+            self.assertEqual(startup_folder(settings), last)
+            settings.last_folder = str(root / "gone")
+            self.assertEqual(startup_folder(settings), archive)
+            settings.archive_root = str(root / "also-gone")
+            self.assertEqual(startup_folder(settings), Path.home())
 
     def test_month_folder_is_archive_root(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

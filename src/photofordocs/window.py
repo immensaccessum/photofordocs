@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageCms
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDrag, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPen, QPixmap, QPolygon, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QColor, QDrag, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -64,27 +64,26 @@ from PySide6.QtWidgets import (
 )
 
 from photofordocs.canvas import READY_MIME, PrintCanvas, SourceCanvas, ViewCanvas, scroll_by
+from photofordocs.dialogs import FormatCatalog, HistogramDialog, JournalDialog, SaveFileDialog, SettingsDialog
 from photofordocs.clothes import all_clothes
-from photofordocs.formats import Format, delete_format, import_photolab_file, load_formats, save_format_order, save_user_format
+from photofordocs.formats import Format, import_photolab_file, load_formats
 from photofordocs.imageops import (
-    apply_corner,
     detect_face,
     detected_eye_t,
     downscale,
     contain_guides,
     format_eye_t,
+    ends_eye_t,
+    head_share,
     head_pose_pixels,
     guide_ratios_from_face,
-    paste_clothes,
-    resolve_corner,
     frame_points,
+    Rect,
+    background_alpha,
     hex_to_rgb,
-    histogram,
     open_image,
-    replace_background,
     ZOOM_MAX,
     ZOOM_MIN,
-    apply_tone_array,
     initial_frame_fit,
     place_crop,
     move_middle,
@@ -126,6 +125,7 @@ from photofordocs.session import (
     report_text,
     save_scheme,
     save_settings,
+    startup_folder,
     send_report,
     split_ready_name,
     SCHEMES_DIR,
@@ -160,9 +160,11 @@ class IndicatorStyle(QProxyStyle):
         enabled = bool(option.state & QStyle.StateFlag.State_Enabled)
         checked = bool(option.state & QStyle.StateFlag.State_On)
         rect = option.rect.adjusted(1, 1, -2, -2)
-        border = QColor("#6a6a6a") if enabled else QColor("#b0b0b0")
-        fill = QColor("#ffffff") if enabled else QColor("#f0f0f0")
-        mark = QColor("#1c1c1c") if enabled else QColor("#8a8a8a")
+        palette = option.palette
+        group = QPalette.ColorGroup.Disabled if not enabled else QPalette.ColorGroup.Active
+        border = palette.color(group, QPalette.ColorRole.Mid)
+        fill = palette.color(group, QPalette.ColorRole.Button)
+        mark = palette.color(group, QPalette.ColorRole.ButtonText)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setPen(QPen(border, 1))
@@ -207,7 +209,7 @@ class UnitSlider(QSlider):
 
 
 def install_indicator_style(app) -> None:
-    base = QStyleFactory.create("windowsvista") or QStyleFactory.create("Windows") or QStyleFactory.create("Fusion")
+    base = QStyleFactory.create("Fusion") or QStyleFactory.create("windowsvista") or QStyleFactory.create("Windows")
     app.setStyle(IndicatorStyle(base))
 
 
@@ -240,6 +242,11 @@ class Shot:
     angle: float = 0.0
     eye_t: float = 0.55
     guides_manual: bool = False
+    # Линия глаз, которую оператор оставил на этом снимке. Двухточечный формат
+    # её не показывает, но при возврате к трёхточечному она должна встать туда же.
+    eye_line: float = 0.55
+    crown: tuple[float, float] | None = None
+    chin: tuple[float, float] | None = None
 
 
 class FinishedView(ViewCanvas, QWidget):
@@ -291,9 +298,9 @@ class FinishedView(ViewCanvas, QWidget):
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#cfcfcf"))
+        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
         if self._pix.isNull():
-            painter.setPen(QColor("#555"))
+            painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Откройте снимок")
             painter.end()
             return
@@ -303,71 +310,6 @@ class FinishedView(ViewCanvas, QWidget):
         painter.end()
 
 
-class HistogramDialog(QDialog):
-    def __init__(self, image: Image.Image, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Гистограмма")
-        self.image = image
-        self.channel = QComboBox()
-        for key, title in (("luma", "Яркость"), ("red", "Красный"), ("green", "Зелёный"), ("blue", "Синий")):
-            self.channel.addItem(title, key)
-        self.clip = QCheckBox("Срезать пики")
-        self.view = QLabel()
-        self.channel.currentIndexChanged.connect(self._draw)
-        self.clip.toggled.connect(self._draw)
-        layout = QVBoxLayout(self)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Канал"))
-        row.addWidget(self.channel)
-        row.addWidget(self.clip)
-        layout.addLayout(row)
-        layout.addWidget(self.view)
-        self._draw()
-
-    def _draw(self) -> None:
-        counts = histogram(self.image, str(self.channel.currentData()), self.clip.isChecked())
-        peak = max(counts) or 1
-        pixmap = QPixmap(512, 160)
-        pixmap.fill(QColor("white"))
-        painter = QPainter(pixmap)
-        painter.setPen(QColor("#222"))
-        for index, value in enumerate(counts):
-            height = int(140 * value / peak)
-            painter.drawLine(index * 2, 150, index * 2, 150 - height)
-        painter.end()
-        self.view.setPixmap(pixmap)
-
-
-class FormatDialog(QDialog):
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Свой формат")
-        self.name = QLineEdit()
-        self.width = QSpinBox()
-        self.height = QSpinBox()
-        self.head = QSpinBox()
-        self.chin = QSpinBox()
-        for box, low, high, value in ((self.width, 15, 120, 35), (self.height, 15, 160, 45), (self.head, 10, 120, 32), (self.chin, 1, 40, 7)):
-            box.setRange(low, high)
-            box.setValue(value)
-            box.setSuffix(" мм")
-        form = QFormLayout(self)
-        form.addRow("Название", self.name)
-        form.addRow("Ширина", self.width)
-        form.addRow("Высота", self.height)
-        form.addRow("Высота головы", self.head)
-        form.addRow("Поле под подбородком", self.chin)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form.addRow(buttons)
-
-    def build(self) -> Format | None:
-        name = self.name.text().strip()
-        if not name or self.head.value() + self.chin.value() >= self.height.value():
-            return None
-        slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in name).strip("-") or "custom"
-        return Format(f"user-{slug}", name, self.width.value(), self.height.value(), self.head.value(), self.chin.value(), "#FFFFFF", "Свой формат.", False)
 
 
 class FileTree(QTreeWidget):
@@ -430,907 +372,6 @@ class ReadyDropTable(QTableWidget):
         event.acceptProposedAction()
 
 
-class SettingsDialog(QDialog):
-    """Настройки по разделам, как в исходной программе."""
-
-    def __init__(self, settings: Settings, formats: list[Format], parent=None) -> None:
-        super().__init__(parent)
-        del formats
-        self.setWindowTitle("Настройки программы")
-        self.settings = settings
-        self.stack = QStackedWidget()
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setMinimumWidth(210)
-        self._add_page(None, "Пути", self._paths_page())
-        interface = self._add_page(None, "Интерфейс", self._interface_page())
-        self._add_page(interface, "Внешний вид", self._look_page())
-        for title, page in (
-            ("Кадр", self._frame_page()),
-            ("Параметры листа/качество", self._paper_page()),
-            ("Поиск", self._search_page()),
-            ("ICC", self._icc_page()),
-            ("Прочие настройки", self._other_page()),
-        ):
-            self._add_page(None, title, page)
-        self.tree.expandAll()
-        self.tree.currentItemChanged.connect(self._show_page)
-        self.tree.setCurrentItem(self.tree.topLevelItem(0))
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Ок")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        body = QHBoxLayout()
-        body.addWidget(self.tree)
-        body.addWidget(self.stack, 1)
-        layout = QVBoxLayout(self)
-        layout.addLayout(body, 1)
-        layout.addWidget(buttons)
-        screen = QGuiApplication.primaryScreen()
-        height = 560
-        if screen is not None:
-            height = min(640, int(screen.availableGeometry().height() * 0.85))
-        self.resize(860, height)
-
-    def _path_row(self, value: str, directory: bool) -> QLineEdit:
-        line = QLineEdit(value)
-        browse = QPushButton("Обзор...")
-        clear = QPushButton("×")
-        clear.setFixedWidth(28)
-
-        def pick() -> None:
-            current = line.text().strip()
-            if directory:
-                chosen = QFileDialog.getExistingDirectory(self, "Папка", current)
-            else:
-                chosen, _selected = QFileDialog.getOpenFileName(self, "Файл", current)
-            if chosen:
-                line.setText(chosen)
-
-        browse.clicked.connect(pick)
-        clear.clicked.connect(line.clear)
-        row = QWidget()
-        row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        row_layout.addWidget(line, 1)
-        row_layout.addWidget(clear)
-        row_layout.addWidget(browse)
-        line._row = row  # type: ignore[attr-defined]
-        return line
-
-    def _add_page(self, parent: QTreeWidgetItem | None, title: str, page: QWidget) -> QTreeWidgetItem:
-        self.stack.addWidget(page)
-        item = QTreeWidgetItem([title])
-        item.setData(0, Qt.ItemDataRole.UserRole, self.stack.count() - 1)
-        if parent is None:
-            self.tree.addTopLevelItem(item)
-        else:
-            parent.addChild(item)
-        return item
-
-    def _show_page(self, current: QTreeWidgetItem | None, _previous=None) -> None:
-        if current is None:
-            return
-        index = current.data(0, Qt.ItemDataRole.UserRole)
-        if isinstance(index, int):
-            self.stack.setCurrentIndex(index)
-
-    def _paths_page(self) -> QWidget:
-        page = QWidget()
-        form = QFormLayout(page)
-        self.photo_base = self._path_row(self.settings.photo_base, True)
-        self.archive = self._path_row(self.settings.archive_root, True)
-        self.editor = self._path_row(self.settings.editor, False)
-        self.clothes = self._path_row(self.settings.clothes_dir, True)
-        self.temp = self._path_row(self.settings.temp_folder, True)
-        self.sheets = self._path_row(self.settings.sheets_folder, True)
-        self.studio = QLineEdit(self.settings.studio)
-        form.addRow("Путь к базе для хранения фотографий", self.photo_base._row)  # type: ignore[attr-defined]
-        form.addRow("Последняя рабочая папка", self.archive._row)  # type: ignore[attr-defined]
-        form.addRow("Программа внешнего графического редактора", self.editor._row)  # type: ignore[attr-defined]
-        form.addRow("Каталог для хранения шаблонов одежды", self.clothes._row)  # type: ignore[attr-defined]
-        form.addRow("Каталог для хранения временных файлов", self.temp._row)  # type: ignore[attr-defined]
-        form.addRow("Каталог для хранения файлов сформированных листов", self.sheets._row)  # type: ignore[attr-defined]
-        form.addRow("Название салона", self.studio)
-        return page
-
-    def _interface_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        self.face = QCheckBox("Использовать автоматическое распознавание лиц")
-        self.face.setChecked(self.settings.face_detect)
-        layout.addWidget(QLabel("Действия при открытии фотографии"))
-        layout.addWidget(self.face)
-        layout.addStretch(1)
-        return page
-
-    def _look_page(self) -> QWidget:
-        page = QWidget()
-        form = QFormLayout(page)
-        self.currency = QLineEdit(self.settings.currency)
-        self.currency.setMaximumWidth(120)
-        form.addRow("Валюта", self.currency)
-        note = QLabel("Цвет панелей, камера и пакеты одежды ColorRiver здесь не повторяются.")
-        note.setWordWrap(True)
-        form.addRow(note)
-        return page
-
-    def _frame_page(self) -> QWidget:
-        page = QWidget()
-        form = QFormLayout(page)
-        self.white = QDoubleSpinBox()
-        self.white.setRange(0, 20)
-        self.white.setDecimals(1)
-        self.white.setSuffix(" мм")
-        self.white.setValue(self.settings.white_frame_mm)
-        self.advert = QLineEdit(self.settings.advert_text)
-        self.photo_dpi = QSpinBox()
-        self.photo_dpi.setRange(72, 1200)
-        self.photo_dpi.setValue(int(self.settings.printer_dpi or self.settings.export_dpi or 300))
-        self.jpeg_photo = QSpinBox()
-        self.jpeg_photo.setRange(10, 100)
-        self.jpeg_photo.setValue(int(self.settings.jpeg_photo))
-        self.cut = QComboBox()
-        self.cut.addItem("не рисовать", "none")
-        self.cut.addItem("рамка", "box")
-        self.cut.addItem("штрих-линии", "dash")
-        self.cut.addItem("в углах", "corners")
-        found = self.cut.findData(self.settings.cut_style)
-        if found >= 0:
-            self.cut.setCurrentIndex(found)
-        self.cut_length = QDoubleSpinBox()
-        self.cut_length.setRange(0.5, 20)
-        self.cut_length.setDecimals(1)
-        self.cut_length.setSuffix(" мм")
-        self.cut_length.setValue(float(self.settings.cut_length_mm or 3))
-        form.addRow("Ширина белой рамки вокруг выходного кадра", self.white)
-        form.addRow("Текст рекламы", self.advert)
-        form.addRow("DPI готовой фотографии", self.photo_dpi)
-        form.addRow("Качество JPEG фотографии", self.jpeg_photo)
-        form.addRow("Линии отреза", self.cut)
-        form.addRow("Длина уголка линии отреза", self.cut_length)
-        return page
-
-    def _paper_page(self) -> QWidget:
-        page = QWidget()
-        form = QFormLayout(page)
-        self.paper = QComboBox()
-        for item in PAPERS:
-            self.paper.addItem(f"{item.name} ({item.width_mm:g}×{item.height_mm:g})", item.id)
-        found = self.paper.findData(self.settings.default_paper)
-        if found >= 0:
-            self.paper.setCurrentIndex(found)
-        self.landscape = QCheckBox("Альбомная ориентация")
-        self.landscape.setChecked(self.settings.default_landscape)
-        self.margin_top = self._margin(self.settings.margin_top_mm)
-        self.margin_left = self._margin(self.settings.margin_left_mm)
-        self.margin_bottom = self._margin(self.settings.margin_bottom_mm)
-        self.margin_right = self._margin(self.settings.margin_right_mm)
-        self.jpeg_sheet = QSpinBox()
-        self.jpeg_sheet.setRange(10, 100)
-        self.jpeg_sheet.setValue(int(self.settings.jpeg_sheet))
-        form.addRow("Лист по умолчанию", self.paper)
-        form.addRow(self.landscape)
-        form.addRow("Поле верхнее", self.margin_top)
-        form.addRow("Поле левое", self.margin_left)
-        form.addRow("Поле нижнее", self.margin_bottom)
-        form.addRow("Поле правое", self.margin_right)
-        form.addRow("Качество сохранения JPEG печатного листа", self.jpeg_sheet)
-        return page
-
-    def _margin(self, value: float) -> QSpinBox:
-        box = QSpinBox()
-        box.setRange(0, 40)
-        box.setSuffix(" мм")
-        box.setValue(int(round(value)))
-        return box
-
-    def _search_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.addWidget(QLabel("Папки для поиска фотографий. Поиск идёт и по вложенным папкам."))
-        self.search_list = QListWidget()
-        for folder in self.settings.search_folder.replace("|", "\n").splitlines():
-            if folder.strip():
-                self.search_list.addItem(folder.strip())
-        add = QPushButton("Добавить путь")
-        remove = QPushButton("Удалить путь")
-        add.clicked.connect(self._add_search)
-        remove.clicked.connect(self._remove_search)
-        buttons = QHBoxLayout()
-        buttons.addWidget(add)
-        buttons.addWidget(remove)
-        buttons.addStretch(1)
-        layout.addWidget(self.search_list, 1)
-        layout.addLayout(buttons)
-        return page
-
-    def _add_search(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Папка поиска")
-        if folder:
-            self.search_list.addItem(folder)
-
-    def _remove_search(self) -> None:
-        row = self.search_list.currentRow()
-        if row >= 0:
-            self.search_list.takeItem(row)
-
-    def _icc_page(self) -> QWidget:
-        page = QWidget()
-        form = QFormLayout(page)
-        self.icc = self._path_row(self.settings.icc, False)
-        self.icc_apply = QCheckBox("Производить преобразование при печати")
-        self.icc_apply.setChecked(bool(self.settings.icc_apply))
-        self.printer = QComboBox()
-        self.printer.setEditable(True)
-        for name in self.settings.printers:
-            self.printer.addItem(name)
-        if self.settings.printer_name:
-            self.printer.setCurrentText(self.settings.printer_name)
-        form.addRow("Профиль принтера", self.icc._row)  # type: ignore[attr-defined]
-        form.addRow(self.icc_apply)
-        form.addRow("Принтер", self.printer)
-        return page
-
-    def _other_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        self.ask_delete = QCheckBox("Запрашивать подтверждение при удалении файлов")
-        self.ask_delete.setChecked(self.settings.ask_before_delete)
-        self.skip_count = QCheckBox("Не выдавать запрос количества размещаемых на листе фото")
-        self.skip_count.setChecked(not self.settings.ask_place)
-        self.place_orient = QComboBox()
-        self.place_orient.addItem("Вертикально", False)
-        self.place_orient.addItem("Горизонтально", True)
-        self.place_orient.setCurrentIndex(1 if self.settings.place_horizontal else 0)
-        self.check_margins = QCheckBox("При печати проверять выход размеров листа за поля")
-        self.check_margins.setChecked(self.settings.check_margins)
-        self.hide_printer = QCheckBox("Не показывать диалог выбора принтера перед печатью")
-        self.hide_printer.setChecked(not self.settings.show_print_dialog)
-        self.align = QCheckBox("Выравнивать фотографии по центру у верхнего края")
-        self.align.setChecked(self.settings.align_center)
-        self.retouch = QSpinBox()
-        self.retouch.setRange(0, 100)
-        stored = self.settings.retouch_koeff
-        self.retouch.setValue(int(round(stored * 100)) if stored <= 1 else int(round(stored)))
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Коэффициент растушевки уголков (100 — резкая, 40 — плавная)"))
-        row.addWidget(self.retouch)
-        for box in (self.ask_delete, self.skip_count, self.check_margins, self.hide_printer, self.align):
-            layout.addWidget(box)
-        orient = QHBoxLayout()
-        orient.addWidget(QLabel("Ориентация кадра"))
-        orient.addWidget(self.place_orient)
-        orient.addStretch(1)
-        layout.addLayout(orient)
-        layout.addLayout(row)
-        note = QLabel("Проверка обновлений и пакетов одежды ColorRiver не выполняется.")
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addStretch(1)
-        return page
-
-    def apply(self) -> Settings:
-        self.settings.photo_base = self.photo_base.text().strip()
-        self.settings.archive_root = self.archive.text().strip() or self.settings.archive_root
-        self.settings.editor = self.editor.text().strip()
-        self.settings.clothes_dir = self.clothes.text().strip()
-        self.settings.temp_folder = self.temp.text().strip()
-        self.settings.sheets_folder = self.sheets.text().strip()
-        self.settings.studio = self.studio.text().strip()
-        self.settings.face_detect = self.face.isChecked()
-        self.settings.currency = self.currency.text().strip() or "₽"
-        self.settings.white_frame_mm = float(self.white.value())
-        self.settings.advert_text = self.advert.text().strip()
-        self.settings.printer_dpi = int(self.photo_dpi.value())
-        self.settings.jpeg_photo = int(self.jpeg_photo.value())
-        self.settings.cut_style = str(self.cut.currentData())
-        self.settings.cut_length_mm = float(self.cut_length.value())
-        self.settings.default_paper = str(self.paper.currentData())
-        self.settings.default_landscape = self.landscape.isChecked()
-        self.settings.margin_top_mm = float(self.margin_top.value())
-        self.settings.margin_left_mm = float(self.margin_left.value())
-        self.settings.margin_bottom_mm = float(self.margin_bottom.value())
-        self.settings.margin_right_mm = float(self.margin_right.value())
-        self.settings.jpeg_sheet = int(self.jpeg_sheet.value())
-        folders = [self.search_list.item(row).text().strip() for row in range(self.search_list.count())]
-        self.settings.search_folder = "\n".join(folder for folder in folders if folder)
-        self.settings.icc = self.icc.text().strip()
-        self.settings.icc_apply = self.icc_apply.isChecked()
-        self.settings.printer_name = self.printer.currentText().strip()
-        self.settings.ask_before_delete = self.ask_delete.isChecked()
-        self.settings.ask_place = not self.skip_count.isChecked()
-        self.settings.place_horizontal = bool(self.place_orient.currentData())
-        self.settings.check_margins = self.check_margins.isChecked()
-        self.settings.show_print_dialog = not self.hide_printer.isChecked()
-        self.settings.align_center = self.align.isChecked()
-        self.settings.retouch_koeff = self.retouch.value() / 100
-        return self.settings
-
-
-class FormatCatalog(QDialog):
-    """Справочник форматов: список слева, трафарет, уголок и цена справа."""
-
-    def __init__(self, formats: list[Format], parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Справочник форматов фотографий")
-        self.formats = list(formats)
-        self._loading = False
-        self.list = QListWidget()
-        self.list.currentRowChanged.connect(self._show)
-        self.name = QLineEdit()
-        self.extension = QLineEdit()
-        self.hotkey = QComboBox()
-        self.hotkey.addItem("", "")
-        for key in ("F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"):
-            self.hotkey.addItem(key, key)
-        self.frame_width = self._mm(15, 200, 35)
-        self.frame_height = self._mm(15, 250, 45)
-        self.color = QComboBox()
-        self.color.addItem("Ч/Б", False)
-        self.color.addItem("Цветная", True)
-        self.count = QSpinBox()
-        self.count.setRange(1, 40)
-        self.horizontal = QCheckBox("Располагать на листе горизонтально")
-        self.paper = QComboBox()
-        self.paper.addItems(["Матовая", "Глянцевая"])
-        self.in_menu = QCheckBox("В контекстном меню")
-        self.mode = QComboBox()
-        self.mode.addItem("По двум точкам")
-        self.mode.addItem("По трем точкам (по ГОСТу)")
-        self.over = self._mm(0, 80, 4)
-        self.under = self._mm(0.5, 80, 7)
-        self.over2 = self._mm(0, 80, 4)
-        self.face = self._mm(5, 80, 14)
-        self.corner = QCheckBox("Уголок")
-        self.corner_form = QComboBox()
-        self.corner_form.addItems(["Прямой", "Круглый центр внутри", "Круглый центр снаружи", "Круг для печати"])
-        self.rx = self._mm(1, 40, 18)
-        self.ry = self._mm(1, 40, 18)
-        self.left_top = QCheckBox("Сверху слева")
-        self.left_bottom = QCheckBox("Снизу слева")
-        self.right_top = QCheckBox("Сверху справа")
-        self.right_bottom = QCheckBox("Снизу справа")
-        self.retouch = QCheckBox("Растушевка")
-        self.circle_x = self._mm(0, 80, 0)
-        self.circle_y = self._mm(0, 80, 0)
-        self.price = QSpinBox()
-        self.price.setRange(0, 100000)
-        self.price.setSuffix(" ₽")
-        form = QWidget()
-        fields = QFormLayout(form)
-        fields.addRow("Название формата", self.name)
-        fields.addRow("Расширение", self.extension)
-        fields.addRow("Сочетание клавиш", self.hotkey)
-        size = QGroupBox("Размер трафарета")
-        size_form = QFormLayout(size)
-        size_form.addRow("Ширина", self.frame_width)
-        size_form.addRow("Высота", self.frame_height)
-        fields.addRow(size)
-        fields.addRow("Цветность", self.color)
-        fields.addRow("Количество фотографий", self.count)
-        fields.addRow(self.horizontal)
-        fields.addRow("Тип бумаги", self.paper)
-        fields.addRow(self.in_menu)
-        fields.addRow("Использовать по умолчанию", self.mode)
-        points = QTabWidget()
-        two = QWidget()
-        two_form = QFormLayout(two)
-        two_form.addRow("Верхнее поле", self.over)
-        two_form.addRow("Нижнее поле", self.under)
-        three = QWidget()
-        three_form = QFormLayout(three)
-        three_form.addRow("Верхнее поле", self.over2)
-        three_form.addRow("Лицевая часть", self.face)
-        points.addTab(two, "по 2-м точкам")
-        points.addTab(three, "По 3-м точкам")
-        fields.addRow(points)
-        corner_box = QGroupBox("Уголок")
-        corner_form = QFormLayout(corner_box)
-        corner_form.addRow(self.corner)
-        corner_form.addRow("Форма уголка", self.corner_form)
-        corner_form.addRow("Радиус X", self.rx)
-        corner_form.addRow("Радиус Y", self.ry)
-        place = QGroupBox("Положение уголка")
-        place_form = QVBoxLayout(place)
-        for box in (self.left_top, self.left_bottom, self.right_top, self.right_bottom):
-            place_form.addWidget(box)
-        corner_form.addRow(place)
-        corner_form.addRow(self.retouch)
-        circle = QGroupBox("Координаты центра круга")
-        circle_form = QFormLayout(circle)
-        circle_form.addRow("Координата X", self.circle_x)
-        circle_form.addRow("Координата Y", self.circle_y)
-        corner_form.addRow(circle)
-        fields.addRow(corner_box)
-        fields.addRow("Стоимость фотографии", self.price)
-        scroll = QScrollArea()
-        scroll.setWidget(form)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        body = QHBoxLayout()
-        body.addWidget(self.list, 1)
-        body.addWidget(scroll, 2)
-        fresh = QPushButton("Новый")
-        fresh.setToolTip("Создать новый формат")
-        copy = QPushButton("Копировать")
-        copy.setToolTip("Создать новый формат с параметрами текущего")
-        save = QPushButton("Внести изменения в формат")
-        save.setToolTip("Сохранить изменения формата")
-        remove = QPushButton("Удалить текущий")
-        up = QPushButton("Вверх")
-        down = QPushButton("Вниз")
-        close = QPushButton("Закрыть")
-        bring = QPushButton("Импорт из оригинала")
-        bring.setToolTip("Прочитать formats.ini справочника «Фото на документы»")
-        fresh.clicked.connect(self._new)
-        copy.clicked.connect(self._copy)
-        save.clicked.connect(self._save)
-        remove.clicked.connect(self._delete)
-        up.clicked.connect(lambda: self._move(-1))
-        down.clicked.connect(lambda: self._move(1))
-        close.clicked.connect(self.accept)
-        bring.clicked.connect(self._import_original)
-        buttons = QHBoxLayout()
-        for button in (fresh, copy, save, remove, up, down, bring):
-            buttons.addWidget(button)
-        buttons.addStretch(1)
-        buttons.addWidget(close)
-        layout = QVBoxLayout(self)
-        layout.addLayout(body, 1)
-        layout.addLayout(buttons)
-        self._fill_list()
-        screen = QGuiApplication.primaryScreen()
-        height = 640
-        if screen is not None:
-            height = min(640, int(screen.availableGeometry().height() * 0.8))
-        self.resize(860, height)
-        self.setMaximumHeight(height)
-        if self.formats:
-            self.list.setCurrentRow(0)
-
-    def _mm(self, low: float, high: float, value: float) -> QDoubleSpinBox:
-        box = QDoubleSpinBox()
-        box.setRange(low, high)
-        box.setDecimals(1)
-        box.setSingleStep(0.5)
-        box.setValue(value)
-        box.setSuffix(" мм")
-        return box
-
-    def _fill_list(self) -> None:
-        self.list.clear()
-        for fmt in self.formats:
-            self.list.addItem(fmt.name)
-
-    def _current(self) -> Format | None:
-        row = self.list.currentRow()
-        if row < 0 or row >= len(self.formats):
-            return None
-        return self.formats[row]
-
-    def _show(self, row: int) -> None:
-        if row < 0 or row >= len(self.formats):
-            return
-        fmt = self.formats[row]
-        self._loading = True
-        self.name.setText(fmt.name)
-        self.extension.setText(fmt.extension)
-        if fmt.hotkey and self.hotkey.findData(fmt.hotkey) < 0:
-            self.hotkey.addItem(fmt.hotkey, fmt.hotkey)
-        index = self.hotkey.findData(fmt.hotkey)
-        self.hotkey.setCurrentIndex(index if index >= 0 else 0)
-        self.frame_width.setValue(fmt.width_mm)
-        self.frame_height.setValue(fmt.height_mm)
-        self.color.setCurrentIndex(1 if fmt.colored else 0)
-        self.count.setValue(max(1, fmt.default_count))
-        self.horizontal.setChecked(fmt.place_horizontal)
-        paper = self.paper.findText(fmt.paper_kind)
-        self.paper.setCurrentIndex(paper if paper >= 0 else 0)
-        self.in_menu.setChecked(fmt.show_in_menu)
-        self.mode.setCurrentIndex(0 if fmt.two_points else 1)
-        overhead = fmt.overhead_mm or max(0.0, fmt.height_mm - fmt.head_height_mm - fmt.chin_bottom_mm)
-        self.over.setValue(overhead)
-        self.under.setValue(fmt.chin_bottom_mm)
-        self.over2.setValue(fmt.overhead2_mm or overhead)
-        self.face.setValue(fmt.face_height_mm or fmt.head_height_mm * 0.45)
-        self.corner.setChecked(fmt.have_corner)
-        self.corner_form.setCurrentIndex(min(max(fmt.corner_kind, 0), 3))
-        self.rx.setValue(fmt.corner_rx_mm)
-        self.ry.setValue(fmt.corner_ry_mm)
-        self.left_top.setChecked(bool(fmt.corner_placement & 1))
-        self.left_bottom.setChecked(bool(fmt.corner_placement & 2))
-        self.right_top.setChecked(bool(fmt.corner_placement & 4))
-        self.right_bottom.setChecked(bool(fmt.corner_placement & 8))
-        self.retouch.setChecked(fmt.retouch)
-        self.circle_x.setValue(fmt.print_cx_mm)
-        self.circle_y.setValue(fmt.print_cy_mm)
-        parent = self.parent()
-        price = int(parent.settings.price_for(fmt.id)) if parent is not None and hasattr(parent, "settings") else 0
-        self.price.setValue(price)
-        self._loading = False
-
-    def _collect(self, ident: str, note: str, background: str, builtin: bool) -> Format | None:
-        width = float(self.frame_width.value())
-        height = float(self.frame_height.value())
-        under = float(self.under.value())
-        overhead = float(self.over.value())
-        overhead2 = float(self.over2.value())
-        face = float(self.face.value())
-        two_points = self.mode.currentIndex() == 0
-        top = overhead if two_points else overhead2
-        head = height - top - under
-        if width <= 0 or height <= 0 or head <= 1 or under <= 0 or head + under >= height:
-            QMessageBox.warning(self, "Формат", "Верхнее поле, нижнее поле и высота не сходятся в один кадр.")
-            return None
-        if face >= head:
-            face = round(head * 0.45, 1)
-        name = self.name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Формат", "Нужно название формата.")
-            return None
-        placement = 0
-        if self.left_top.isChecked():
-            placement |= 1
-        if self.left_bottom.isChecked():
-            placement |= 2
-        if self.right_top.isChecked():
-            placement |= 4
-        if self.right_bottom.isChecked():
-            placement |= 8
-        return Format(
-            id=ident,
-            name=name,
-            width_mm=width,
-            height_mm=height,
-            head_height_mm=round(head, 2),
-            chin_bottom_mm=under,
-            background=background,
-            note=note,
-            builtin=builtin,
-            have_corner=self.corner.isChecked(),
-            corner_kind=self.corner_form.currentIndex(),
-            corner_placement=placement,
-            corner_rx_mm=float(self.rx.value()),
-            corner_ry_mm=float(self.ry.value()),
-            show_in_menu=self.in_menu.isChecked(),
-            extension=self.extension.text().strip() or "jpg",
-            hotkey=str(self.hotkey.currentData() or ""),
-            colored=bool(self.color.currentData()),
-            default_count=self.count.value(),
-            place_horizontal=self.horizontal.isChecked(),
-            paper_kind=self.paper.currentText(),
-            two_points=two_points,
-            overhead_mm=overhead,
-            overhead2_mm=overhead2,
-            face_height_mm=face,
-            retouch=self.retouch.isChecked(),
-            print_cx_mm=float(self.circle_x.value()),
-            print_cy_mm=float(self.circle_y.value()),
-        )
-
-    def _save(self) -> None:
-        current = self._current()
-        if current is None:
-            return
-        fmt = self._collect(current.id, current.note, current.background, False)
-        if fmt is None:
-            return
-        save_user_format(fmt)
-        row = self.list.currentRow()
-        self.formats[row] = fmt
-        self.list.item(row).setText(fmt.name)
-        self._store_price(fmt.id)
-        self._publish()
-
-    def _store_price(self, ident: str) -> None:
-        parent = self.parent()
-        if parent is None or not hasattr(parent, "settings"):
-            return
-        parent.settings.prices[ident] = float(self.price.value())
-        save_settings(parent.settings)
-
-    def _publish(self) -> None:
-        save_format_order([fmt.id for fmt in self.formats])
-        parent = self.parent()
-        if parent is None or not hasattr(parent, "formats"):
-            return
-        parent.formats = list(self.formats)
-        parent._fill_format_combo(parent.format_box)
-        parent._load_format_fields()
-
-    def _new(self) -> None:
-        ident = f"user-{len(self.formats) + 1}"
-        while any(fmt.id == ident for fmt in self.formats):
-            ident += "x"
-        self.name.setText("Новый формат")
-        fmt = self._collect(ident, "Свой формат.", "#FFFFFF", False)
-        if fmt is None:
-            return
-        save_user_format(fmt)
-        self.formats.append(fmt)
-        self._fill_list()
-        self.list.setCurrentRow(len(self.formats) - 1)
-        self._store_price(fmt.id)
-        self._publish()
-
-    def _copy(self) -> None:
-        current = self._current()
-        if current is None:
-            return
-        ident = f"user-{current.id}"
-        while any(fmt.id == ident for fmt in self.formats):
-            ident += "-2"
-        self.name.setText(current.name + " копия")
-        fmt = self._collect(ident, current.note, current.background, False)
-        if fmt is None:
-            return
-        save_user_format(fmt)
-        self.formats.append(fmt)
-        self._fill_list()
-        self.list.setCurrentRow(len(self.formats) - 1)
-        self._store_price(fmt.id)
-        self._publish()
-
-    def _delete(self) -> None:
-        current = self._current()
-        row = self.list.currentRow()
-        if current is None:
-            return
-        answer = QMessageBox.question(self, "Удалить формат", f"Удалить «{current.name}»?")
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        delete_format(current)
-        del self.formats[row]
-        self._fill_list()
-        if self.formats:
-            self.list.setCurrentRow(min(row, len(self.formats) - 1))
-        self._publish()
-
-    def _move(self, step: int) -> None:
-        row = self.list.currentRow()
-        target = row + step
-        if row < 0 or target < 0 or target >= len(self.formats):
-            return
-        self.formats[row], self.formats[target] = self.formats[target], self.formats[row]
-        self._fill_list()
-        self.list.setCurrentRow(target)
-        self._publish()
-
-    def _import_original(self) -> None:
-        parent = self.parent()
-        if parent is None or not hasattr(parent, "import_original_formats"):
-            return
-        parent.import_original_formats()
-        self.formats = list(parent.formats)
-        self._fill_list()
-        if self.formats:
-            self.list.setCurrentRow(0)
-
-
-class JournalDialog(QDialog):
-    def __init__(self, lines, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Журнал")
-        self.lines = lines
-        self.list = QListWidget()
-        copies, amount = day_total(lines)
-        self.summary = QLabel(f"Сегодня: {copies} комплектов, {amount:.0f} ₽")
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.summary)
-        layout.addWidget(self.list)
-        self._fill()
-        remove = QPushButton("Удалить выбранную строку")
-        remove.clicked.connect(self._remove)
-        layout.addWidget(remove)
-
-    def _fill(self) -> None:
-        self.list.clear()
-        for index, line in enumerate(self.lines):
-            item = QListWidgetItem(f"{line.day} {line.at}  {line.number}  {line.formats}  {line.copies} шт  {line.amount:.0f} ₽")
-            item.setData(Qt.ItemDataRole.UserRole, index)
-            self.list.addItem(item)
-
-    def _remove(self) -> None:
-        row = self.list.currentRow()
-        if row < 0:
-            return
-        del self.lines[row]
-        self._fill()
-
-
-@dataclass
-class SaveFileSpec:
-    limit_size: bool
-    width_px: int
-    height_px: int
-    dpi: int
-    limit_bytes: bool
-    max_kb: int
-    open_folder: bool
-
-
-class SaveFileDialog(QDialog):
-    """Окно «Сохранить в файл»: размер в пикселях или миллиметрах, потолок JPEG и папка."""
-
-    def __init__(
-        self,
-        parent: QWidget,
-        width_mm: float,
-        height_mm: float,
-        dpi: int,
-        max_kb: int,
-        limit_size: bool,
-        limit_bytes: bool,
-        open_folder: bool,
-        preview: QPixmap,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Сохранить в файл")
-        self._mm_w = max(1.0, float(width_mm))
-        self._mm_h = max(1.0, float(height_mm))
-        self._dpi = max(36, int(dpi))
-        self._syncing = False
-
-        self.limit_size = QCheckBox("Контроль размеров изображения")
-        self.limit_size.setChecked(limit_size)
-        self.units = QTabBar()
-        self.units.addTab("Пиксели")
-        self.units.addTab("Миллиметры")
-        self.units.setCurrentIndex(1)
-        self.units.setExpanding(False)
-
-        self.width_box = QDoubleSpinBox()
-        self.height_box = QDoubleSpinBox()
-        for box in (self.width_box, self.height_box):
-            box.setDecimals(0)
-            box.setRange(1, 1000)
-            box.setMaximumWidth(90)
-        self.dpi_box = QSpinBox()
-        self.dpi_box.setRange(36, 2400)
-        self.dpi_box.setValue(self._dpi)
-        self.dpi_box.setMaximumWidth(90)
-
-        self.size_frame = QFrame()
-        self.size_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        size = self.size_frame
-        grid = QGridLayout(size)
-        grid.setContentsMargins(8, 8, 8, 8)
-        grid.addWidget(QLabel("Ширина"), 0, 0)
-        grid.addWidget(self.width_box, 0, 1)
-        grid.addWidget(QLabel("DPI"), 0, 2)
-        grid.addWidget(self.dpi_box, 0, 3)
-        grid.addWidget(QLabel("Высота"), 1, 0)
-        grid.addWidget(self.height_box, 1, 1)
-        grid.setColumnStretch(4, 1)
-
-        self.limit_bytes = QCheckBox("Контроль размеров файла (только JPEG)")
-        self.limit_bytes.setChecked(limit_bytes)
-        self.kb_label = QLabel("Максимальный размер файла (КБ)")
-        self.max_kb = QSpinBox()
-        self.max_kb.setRange(1, 9999)
-        self.max_kb.setValue(max(1, int(max_kb or 48)))
-        self.max_kb.setMaximumWidth(90)
-        kb_row = QHBoxLayout()
-        kb_row.addWidget(self.kb_label)
-        kb_row.addWidget(self.max_kb)
-        kb_row.addStretch(1)
-
-        self.open_folder = QCheckBox("Открыть папку содержащую файл после сохранения")
-        self.open_folder.setChecked(open_folder)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Ок")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("Отмена")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        left = QVBoxLayout()
-        left.addWidget(self.limit_size)
-        left.addWidget(self.units)
-        left.addWidget(size)
-        left.addWidget(self.limit_bytes)
-        left.addLayout(kb_row)
-        left.addWidget(self.open_folder)
-        left.addStretch(1)
-        left.addWidget(buttons, alignment=Qt.AlignmentFlag.AlignRight)
-
-        photo = QLabel()
-        photo.setFixedSize(210, 280)
-        photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        photo.setStyleSheet("background: white; border: 1px solid #c8c8c8;")
-        if preview is not None and not preview.isNull():
-            photo.setPixmap(
-                preview.scaled(
-                    206,
-                    276,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-
-        row = QHBoxLayout()
-        row.addLayout(left, 1)
-        row.addWidget(photo, alignment=Qt.AlignmentFlag.AlignTop)
-        layout = QVBoxLayout(self)
-        layout.addLayout(row)
-
-        self.limit_size.toggled.connect(self._toggle_size)
-        self.limit_bytes.toggled.connect(self._toggle_bytes)
-        self.units.currentChanged.connect(self._show_unit)
-        self.width_box.valueChanged.connect(self._width_edited)
-        self.height_box.valueChanged.connect(self._height_edited)
-        self.dpi_box.valueChanged.connect(self._dpi_edited)
-        self._show_unit(1)
-        self._toggle_size(self.limit_size.isChecked())
-        self._toggle_bytes(self.limit_bytes.isChecked())
-
-    def _pixels(self) -> tuple[int, int]:
-        return (
-            max(1, round(self._mm_w / 25.4 * self._dpi)),
-            max(1, round(self._mm_h / 25.4 * self._dpi)),
-        )
-
-    def _show_unit(self, index: int) -> None:
-        pixels = index == 0
-        self._syncing = True
-        if pixels:
-            width, height = self._pixels()
-            self.width_box.setRange(1, 20000)
-            self.height_box.setRange(1, 20000)
-            self.width_box.setValue(width)
-            self.height_box.setValue(height)
-        else:
-            self._mm_w = float(round(self._mm_w))
-            self._mm_h = float(round(self._mm_h))
-            self.width_box.setRange(1, 1000)
-            self.height_box.setRange(1, 1000)
-            self.width_box.setValue(self._mm_w)
-            self.height_box.setValue(self._mm_h)
-        self._syncing = False
-
-    def _width_edited(self, value: float) -> None:
-        if self._syncing:
-            return
-        if self.units.currentIndex() == 0:
-            self._mm_w = float(value) / self._dpi * 25.4
-        else:
-            self._mm_w = float(value)
-
-    def _height_edited(self, value: float) -> None:
-        if self._syncing:
-            return
-        if self.units.currentIndex() == 0:
-            self._mm_h = float(value) / self._dpi * 25.4
-        else:
-            self._mm_h = float(value)
-
-    def _dpi_edited(self, value: int) -> None:
-        self._dpi = max(36, int(value))
-        if self.units.currentIndex() == 0 and not self._syncing:
-            self._show_unit(0)
-
-    def _toggle_size(self, on: bool) -> None:
-        for widget in (self.units, self.size_frame):
-            widget.setEnabled(on)
-
-    def _toggle_bytes(self, on: bool) -> None:
-        self.kb_label.setEnabled(on)
-        self.max_kb.setEnabled(on)
-
-    def spec(self) -> SaveFileSpec:
-        width, height = self._pixels()
-        return SaveFileSpec(
-            limit_size=self.limit_size.isChecked(),
-            width_px=width,
-            height_px=height,
-            dpi=self._dpi,
-            limit_bytes=self.limit_bytes.isChecked(),
-            max_kb=int(self.max_kb.value()),
-            open_folder=self.open_folder.isChecked(),
-        )
-
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
@@ -1358,8 +399,8 @@ class MainWindow(QMainWindow):
         self._pending_folder: Path | None = None
         self.allow_rotate = bool(self.settings.allow_rotate)
         self._paper_horizontal = bool(self.settings.print_horizontal)
-        self.quick_tunes: list[dict] = []
         self._bg_cache: dict[int, tuple] = {}
+        self._alpha_cache: dict[int, tuple] = {}
         self._live_cache: dict[int, tuple] = {}
         self._sheet_pixmaps: dict[str, tuple] = {}
         self._shot_stamps: dict[str, tuple[int, int]] = {}
@@ -1419,8 +460,8 @@ class MainWindow(QMainWindow):
         vertical.setFixedWidth(14)
         horizontal.setFixedHeight(14)
         corner = QWidget()
+        corner.setObjectName("scrollcorner")
         corner.setFixedSize(14, 14)
-        corner.setStyleSheet("background: #dedede;")
         grid.addWidget(vertical, 0, 1)
         grid.addWidget(horizontal, 1, 0)
         grid.addWidget(corner, 1, 1)
@@ -1599,6 +640,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(4)
 
         left = QFrame()
+        left.setObjectName("filepane")
         left.setFrameShape(QFrame.Shape.StyledPanel)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(2, 2, 2, 2)
@@ -1751,56 +793,10 @@ class MainWindow(QMainWindow):
         self.splitter = splitter
         layout.addWidget(splitter)
         self._apply_workplace()
-        self.setStyleSheet(
-            """
-            QMainWindow, QWidget { background: #ececec; color: #202020; font-size: 12px; }
-            QPushButton { background: #f7f7f7; border: 1px solid #b5b5b5; padding: 3px 6px; }
-            QPushButton#step { padding: 4px 10px; }
-            QPushButton#step:checked { background: white; font-weight: 600; }
-            QTreeWidget, QListWidget { background: white; }
-            QFrame { background: #f3f3f3; }
-            QGroupBox {
-                background: #fbfbfb;
-                border: 1px solid #8ea0b5;
-                border-radius: 4px;
-                margin-top: 14px;
-                padding: 12px 8px 8px 8px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 10px;
-                padding: 1px 6px;
-                background: #d9e4f2;
-                color: #16375f;
-                font-weight: 700;
-            }
-            QSplitter::handle { background: #c4c4c4; }
-            QSplitter::handle:horizontal { width: 6px; }
-            QSplitter::handle:vertical { height: 6px; }
-            QToolButton#filetool { background: #f7f7f7; border: 1px solid #c5c5c5; border-radius: 3px; padding: 0; }
-            QToolButton#filetool:hover { background: #e7eef8; }
-            QToolButton#sizeaction { background: #f4f4f4; border: 1px solid #b5b5b5; border-radius: 2px; padding: 2px 4px; }
-            QWidget#overlaybar { background: transparent; }
-            QToolButton#viewzoom { background: rgba(255, 255, 255, 140); border: 1px solid rgba(90, 90, 90, 80); border-radius: 3px; padding: 0; }
-            QToolButton#viewzoom:hover { background: rgba(255, 255, 255, 210); }
-            QToolButton#viewzoom:disabled { background: rgba(243, 243, 243, 100); color: #9a9a9a; }
-            QScrollBar:vertical { background: #dedede; width: 14px; margin: 0; }
-            QScrollBar::handle:vertical { background: #b4b4b4; min-height: 28px; border: 1px solid #9a9a9a; }
-            QScrollBar::handle:vertical:hover { background: #9e9e9e; }
-            QScrollBar:horizontal { background: #dedede; height: 14px; margin: 0; }
-            QScrollBar::handle:horizontal { background: #b4b4b4; min-width: 28px; border: 1px solid #9a9a9a; }
-            QScrollBar::handle:horizontal:hover { background: #9e9e9e; }
-            QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-            QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-            QPushButton#printaction { background: white; border: 1px solid #b5b5b5; padding: 4px 8px; text-align: left; }
-            QPushButton#printaction:hover { background: #e7eef8; }
-            QMenu { background: #f4f4f4; border: 1px solid #b0b0b0; }
-            QMenu::item { padding: 5px 28px 5px 18px; background: transparent; }
-            QMenu::item:selected { background: #c5ceda; color: #101010; }
-            QMenu::separator { height: 1px; background: #d0d0d0; margin: 4px 8px; }
-            """
-        )
+        from photofordocs.theme import bind_theme
+
+        bind_theme(QApplication.instance())
+        self.refresh_theme()
 
     def _slider(self, low: int, high: int, value: int, handler) -> QSlider:
         slider = UnitSlider(Qt.Orientation.Horizontal)
@@ -1811,17 +807,33 @@ class MainWindow(QMainWindow):
         self._paint_slider(slider, "#d5d5d5")
         return slider
 
-    def _paint_slider(self, slider: QSlider, groove: str) -> None:
+    def _paint_slider(self, slider: QSlider, groove: str, *, remember: bool = True) -> None:
         """Одна и та же круглая ручка. Цвет дорожки задаёт смысл ползунка."""
+        from photofordocs.theme import slider_chrome
+
+        if remember or not slider.property("base_groove"):
+            slider.setProperty("base_groove", groove)
+        handle, edge, border = slider_chrome()
         slider.setStyleSheet(
             "QSlider::groove:horizontal {"
-            f" height: 8px; border-radius: 4px; border: 1px solid #9a9a9a; background: {groove};"
+            f" height: 8px; border-radius: 4px; border: 1px solid {border}; background: {groove};"
             "}"
             "QSlider::handle:horizontal {"
             " width: 14px; height: 14px; margin: -4px 0; border-radius: 7px;"
-            " background: white; border: 1px solid #4a4a4a;"
+            f" background: {handle}; border: 1px solid {edge};"
             "}"
         )
+
+    def refresh_theme(self) -> None:
+        """Ползунки держат свой цвет отдельно от общей таблицы, поэтому их перекрашиваем сами."""
+        from photofordocs.theme import is_dark
+
+        dark = is_dark()
+        for slider in self.findChildren(UnitSlider):
+            groove = slider.property("base_groove") or "#d5d5d5"
+            if groove == "#d5d5d5" and dark:
+                groove = "#5a5a5a"
+            self._paint_slider(slider, groove, remember=False)
 
     def _spin_width(self, sample: str) -> int:
         return self.fontMetrics().horizontalAdvance(sample) + 20
@@ -1944,9 +956,6 @@ class MainWindow(QMainWindow):
     def _format_params_box(self) -> QGroupBox:
         box = QGroupBox("Параметры формата")
         self.format_params = box
-        self.frame_box = QCheckBox("Показать формат")
-        self.frame_box.setChecked(True)
-        self.frame_box.toggled.connect(lambda _v: self.refresh())
         self.fmt_width = self._mm_box(10, 220, 35)
         self.fmt_height = self._mm_box(10, 260, 45)
         self.fmt_top = self._mm_box(0, 80, 2)
@@ -1993,7 +1002,14 @@ class MainWindow(QMainWindow):
         layout.addLayout(flags)
         layout.addWidget(self.corner)
         layout.addLayout(radius_row)
-        layout.addWidget(self.frame_box)
+        self.head_share = QLabel("Голова —")
+        self.head_share.setWordWrap(True)
+        self.head_share.setToolTip(
+            "Доля высоты кадра между верхней и нижней лапкой. "
+            "Требование «не менее 70%» считают так же: голова занимает столько полос, "
+            "если высоту кадра разделить на десять равных частей."
+        )
+        layout.addWidget(self.head_share)
         box.setMinimumWidth(220)
         return box
 
@@ -2003,9 +1019,22 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 4, 6, 8)
         layout.setSpacing(8)
         self._ready_layout = layout
-        self.replace_box = QCheckBox("Залить фон")
+        self.replace_box = QCheckBox("Не корректировать фон")
         self.replace_box.setChecked(bool(getattr(self.settings, "replace_background", False)))
         self.replace_box.toggled.connect(self._store_tone)
+        self.fill_edge = QRadioButton("От краёв")
+        self.fill_figure = QRadioButton("По фигуре")
+        self.fill_method = QButtonGroup(self)
+        self.fill_method.addButton(self.fill_edge, 0)
+        self.fill_method.addButton(self.fill_figure, 1)
+        if getattr(self.settings, "background_method", "edge") == "figure":
+            self.fill_figure.setChecked(True)
+        else:
+            self.fill_edge.setChecked(True)
+        self.fill_method.idClicked.connect(lambda _index: self._store_tone())
+        self.paint_box = QCheckBox("Заменить цвет")
+        self.paint_box.setChecked(bool(getattr(self.settings, "paint_background", False)))
+        self.paint_box.toggled.connect(self._store_tone)
         self.color_box = QComboBox()
         self.color_box.addItem("Как в формате", "format")
         self.color_box.addItem("Белый", "#FFFFFF")
@@ -2060,12 +1089,18 @@ class MainWindow(QMainWindow):
         self.brush = self._slider(0, 200, int(self.settings.brush_px), self._store_tone)
         other_color = QPushButton("Другой цвет")
         other_color.clicked.connect(self._pick_background)
-        background = QGroupBox("Замена цвета фона")
+        background = QGroupBox("Фон")
         background_layout = QVBoxLayout(background)
         background_layout.setSpacing(8)
         background_layout.addWidget(self.replace_box)
-        background_layout.addWidget(self._tone_line("Порог (%)", self.tolerance, None))
+        methods = QHBoxLayout()
+        methods.addWidget(self.fill_edge)
+        methods.addWidget(self.fill_figure)
+        methods.addStretch(1)
+        background_layout.addLayout(methods)
+        background_layout.addWidget(self._tone_line("Чувствительность", self.tolerance, None))
         background_layout.addWidget(self._tone_line("Размер кисти", self.brush, None))
+        background_layout.addWidget(self.paint_box)
         background_layout.addWidget(QLabel("Цвет фона"))
         background_layout.addWidget(self.color_box)
         background_layout.addWidget(other_color)
@@ -2384,22 +1419,60 @@ class MainWindow(QMainWindow):
         self._load_format_fields()
         shot = self.current_shot()
         if shot is not None:
-            fmt = self.current_format()
-            shot.eye_t = (
-                detected_eye_t(shot.face, shot.working.size, fmt)
-                if shot.face and not fmt.two_points and fmt.face_height_mm > 0
-                else format_eye_t(fmt)
-            )
-            shot.guides_manual = False
-            if shot.face is not None:
-                shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
-                    shot.working.size, shot.face, fmt, shot.eye_t
-                )
-                self._contain(shot)
-            else:
-                shot.zoom, shot.shift_x, shot.shift_y = 1.0, 0.0, 0.0
+            self._apply_saved_ends(shot)
         self.refresh()
         self._remember()
+
+    def _capture_ends(self, shot: Shot) -> None:
+        """Запоминает верхнюю и нижнюю лапки в пикселях снимка."""
+        fmt = self.current_format()
+        crop = self._crop(shot)
+        guide = self._shot_guide_ratios(shot, crop)
+        angle = shot.angle if self.allow_rotate else 0.0
+        points = frame_points(crop, fmt, angle, shot.eye_t, guide)
+        shot.crown = points["crown"]
+        shot.chin = points["chin"]
+
+    def _apply_saved_ends(self, shot: Shot) -> None:
+        """Новый формат строится вокруг уже поставленных лапок."""
+        if shot.crown is None or shot.chin is None:
+            self._reset_shot_frame(shot)
+            return
+        fmt = self.current_format()
+        eye_t = ends_eye_t(fmt, shot.eye_line)
+        left, top, crop_h, angle = pose_from_ends(fmt, shot.crown, shot.chin, self.allow_rotate, eye_t)
+        shot.eye_t = eye_t
+        shot.angle = angle
+        shot.guides_manual = True
+        shot.zoom, shot.shift_x, shot.shift_y = zoom_shift_for_box(
+            shot.working.size, shot.face, fmt, left, top, crop_h, eye_t
+        )
+        self._contain(shot)
+        self._capture_ends(shot)
+
+    def _reset_shot_frame(self, shot: Shot) -> None:
+        """Снова ставит рамку по лицу. Так происходит при другой фотографии и при перезагрузке."""
+        fmt = self.current_format()
+        shot.angle = 0.0
+        detected = (
+            detected_eye_t(shot.face, shot.working.size, fmt)
+            if shot.face is not None
+            else format_eye_t(fmt)
+        )
+        shot.eye_line = detected
+        if fmt.two_points or fmt.face_height_mm <= 0:
+            shot.eye_t = format_eye_t(fmt)
+        else:
+            shot.eye_t = detected
+        shot.guides_manual = False
+        if shot.face is not None:
+            shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
+                shot.working.size, shot.face, fmt, shot.eye_t
+            )
+        else:
+            shot.zoom, shot.shift_x, shot.shift_y = 1.0, 0.0, 0.0
+        self._contain(shot)
+        self._capture_ends(shot)
 
     def _apply_saved_format(self) -> None:
         if not hasattr(self, "format_box"):
@@ -2499,6 +1572,9 @@ class MainWindow(QMainWindow):
             return
         base = next(item for item in self.formats if item.id == self.format_box.currentData())
         if not base.two_points:
+            shot = self.current_shot()
+            if shot is not None:
+                self._apply_saved_ends(shot)
             self.refresh()
             return
         bottom = self.fmt_height.value() - self.fmt_top.value() - self.fmt_head.value()
@@ -2513,6 +1589,9 @@ class MainWindow(QMainWindow):
         base = next(item for item in self.formats if item.id == self.format_box.currentData())
         if base.two_points:
             self._sync_head()
+        shot = self.current_shot()
+        if shot is not None:
+            self._apply_saved_ends(shot)
         self.refresh()
 
     def _apply_retouch(self, checked: bool) -> None:
@@ -2775,14 +1854,20 @@ class MainWindow(QMainWindow):
         for action in (add_files, delete_file, search, setup, formats, journal):
             bar.addAction(action)
         bar.addSeparator()
-        self.tune_box = QComboBox()
-        self.tune_box.setMinimumWidth(140)
-        self.tune_box.addItem("Пустые", None)
-        self.tune_box.currentIndexChanged.connect(self._apply_quick_tune)
-        bar.addWidget(self.tune_box)
-        bar.addAction(command("Записать настройку", "Записать текущие коррекции в выбранную настройку", pix.SP_DialogSaveButton, self._update_quick_tune))
-        bar.addAction(command("Добавить настройку", "Добавить быструю настройку", pix.SP_DialogYesButton, self._add_quick_tune))
-        bar.addAction(command("Удалить настройку", "Удалить выбранную быструю настройку", pix.SP_DialogCancelButton, self._delete_quick_tune))
+        self._tunes = [
+            {"name": str(item.get("name", "")).strip(), "tone": dict(item["tone"])}
+            for item in self.settings.quick_tunes
+            if str(item.get("name", "")).strip() and isinstance(item.get("tone"), dict)
+        ]
+        self.tune_menu = QMenu(self)
+        tune_button = QToolButton()
+        tune_button.setIcon(style.standardIcon(pix.SP_FileDialogListView))
+        tune_button.setToolTip("Сохранённые коррекции")
+        tune_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tune_button.setMenu(self.tune_menu)
+        tune_button.setAutoRaise(True)
+        bar.addWidget(tune_button)
+        self._fill_tune_menu()
         bar.addSeparator()
         bar.addAction(about)
         bar.addAction(help_action)
@@ -2790,11 +1875,6 @@ class MainWindow(QMainWindow):
         if tool is not None:
             tool.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.quick_bar = bar
-        for item in self.settings.quick_tunes:
-            name = str(item.get("name", "")).strip()
-            tone = item.get("tone")
-            if name and isinstance(tone, dict):
-                self.tune_box.addItem(name, tone)
         if not self.settings.show_quick_bar:
             bar.hide()
         bar.visibilityChanged.connect(lambda _visible: self._remember())
@@ -2889,15 +1969,7 @@ class MainWindow(QMainWindow):
                 guides_manual=False,
             )
         )
-        if face is not None:
-            shot = self.shots[-1]
-            fmt = self.current_format()
-            if not fmt.two_points and fmt.face_height_mm > 0:
-                shot.eye_t = detected_eye_t(face, shot.working.size, fmt)
-            shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
-                shot.working.size, shot.face, fmt, shot.eye_t
-            )
-            self._contain(shot)
+        self._reset_shot_frame(self.shots[-1])
         self._remember_shot_file(self.shots[-1])
 
     def _remember_shot_file(self, shot: Shot) -> None:
@@ -2917,18 +1989,9 @@ class MainWindow(QMainWindow):
         shot.image = image
         shot.working = downscale(image, PREVIEW_SIDE)
         shot.face = detect_face(shot.working) if self.settings.face_detect else None
-        fmt = self.current_format()
-        shot.eye_t = (
-            detected_eye_t(shot.face, shot.working.size, fmt)
-            if shot.face and not fmt.two_points and fmt.face_height_mm > 0
-            else format_eye_t(fmt)
-        )
-        shot.guides_manual = False
-        if shot.face is not None:
-            shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
-                shot.working.size, shot.face, fmt, shot.eye_t
-            )
+        self._reset_shot_frame(shot)
         self._bg_cache.pop(id(shot), None)
+        self._alpha_cache.pop(id(shot), None)
         self._live_cache.pop(id(shot), None)
         self._remember_shot_file(shot)
         if self.current_shot() is shot:
@@ -3209,6 +2272,9 @@ class MainWindow(QMainWindow):
             settings.margin_right_mm = float(self.margin_right.value())
             settings.margin_bottom_mm = float(self.margin_bottom.value())
             settings.margin_left_mm = float(self.margin_left.value())
+        folder = getattr(self, "folder_root", None)
+        if folder is not None and Path(folder).is_dir():
+            settings.last_folder = str(Path(folder))
         settings.allow_rotate = bool(self.allow_rotate)
         settings.print_horizontal = bool(self._paper_horizontal)
         if hasattr(self, "format_box"):
@@ -3217,12 +2283,9 @@ class MainWindow(QMainWindow):
                 settings.default_format = str(ident)
         if hasattr(self, "quick_bar"):
             settings.show_quick_bar = self.quick_bar.isVisible()
-            tunes = []
-            for index in range(self.tune_box.count()):
-                tone = self.tune_box.itemData(index)
-                if isinstance(tone, dict):
-                    tunes.append({"name": self.tune_box.itemText(index), "tone": dict(tone)})
-            settings.quick_tunes = tunes
+            settings.quick_tunes = [
+                {"name": item["name"], "tone": dict(item["tone"])} for item in getattr(self, "_tunes", [])
+            ]
         self._persist_tone_defaults()
 
     def _persist_tone_defaults(self) -> None:
@@ -3246,6 +2309,10 @@ class MainWindow(QMainWindow):
         settings.brush_px = int(self.brush.value())
         if hasattr(self, "replace_box"):
             settings.replace_background = self.replace_box.isChecked()
+        if hasattr(self, "fill_figure"):
+            settings.background_method = "figure" if self.fill_figure.isChecked() else "edge"
+        if hasattr(self, "paint_box"):
+            settings.paint_background = self.paint_box.isChecked()
 
     def _set_thumb(self, image: Image.Image) -> None:
         self._thumb_source = pil_to_pixmap(image)
@@ -3302,6 +2369,11 @@ class MainWindow(QMainWindow):
             self._save_left_sizes()
         super().closeEvent(event)
 
+    def _dialog_folder(self) -> str:
+        """Стартовая папка диалогов. На Linux пустой путь открывает домашнюю, а не прошлую."""
+        folder = self.folder_root if self.folder_root is not None else startup_folder(self.settings)
+        return str(folder if Path(folder).is_dir() else Path.home())
+
     def _fill_drives(self) -> None:
         self._file_order = (self.settings.sort_key, self.settings.sort_reverse)
         self.drive_box.blockSignals(True)
@@ -3311,8 +2383,7 @@ class MainWindow(QMainWindow):
             self.drive_box.addItem(title, mount)
         self.drive_box.blockSignals(False)
         self.drive_box.currentIndexChanged.connect(self._drive_changed)
-        start = Path(self.settings.archive_root)
-        self._show_folder(start if start.is_dir() else Path.home())
+        self._show_folder(startup_folder(self.settings))
 
     def _drive_changed(self) -> None:
         mount = Path(str(self.drive_box.currentData()))
@@ -3320,6 +2391,7 @@ class MainWindow(QMainWindow):
         self.folder_root = mount
         self._watch_open_folder()
         self._fill_files()
+        self._remember()
 
     def _show_folder(self, folder: Path) -> None:
         folder = folder if folder.is_dir() else folder.parent
@@ -3335,19 +2407,31 @@ class MainWindow(QMainWindow):
         self._pending_folder = folder
         self.dir_model.setRootPath(str(folder))
         self._fill_files()
+        self._remember()
 
     def _directory_loaded(self, path: str) -> None:
         pending = self._pending_folder
         if pending is None:
             return
         loaded = Path(path)
-        if loaded == pending or loaded in pending.parents:
+        try:
+            same = loaded.resolve() == pending.resolve()
+            ancestor = pending.resolve().is_relative_to(loaded.resolve())
+        except (OSError, ValueError):
+            same = loaded == pending
+            ancestor = loaded == pending or loaded in pending.parents
+        if same or ancestor:
             index = self.dir_model.index(str(loaded))
             self.folders.expand(index)
-        if loaded == pending:
+        if same:
             index = self.dir_model.index(str(pending))
-            self.folders.setCurrentIndex(index)
-            self.folders.scrollTo(index)
+            parent = index.parent()
+            while parent.isValid():
+                self.folders.expand(parent)
+                parent = parent.parent()
+            if index.isValid():
+                self.folders.setCurrentIndex(index)
+                self.folders.scrollTo(index)
             self._pending_folder = None
 
     def _folder_clicked(self, index) -> None:
@@ -3356,6 +2440,7 @@ class MainWindow(QMainWindow):
             self.folder_root = path
             self._watch_open_folder()
             self._fill_files()
+            self._remember()
 
     def _watch_open_folder(self) -> None:
         if not hasattr(self, "_folder_watch"):
@@ -3577,6 +2662,8 @@ class MainWindow(QMainWindow):
     def _load_source(self, path: Path) -> None:
         for index, shot in enumerate(self.shots):
             if shot.path == path:
+                if self.current_shot() is not shot:
+                    self._reset_shot_frame(shot)
                 self._select_row(index)
                 self._mark_tree(path)
                 return
@@ -3636,8 +2723,7 @@ class MainWindow(QMainWindow):
         shot.image = shot.image.transpose(turn)
         shot.working = downscale(shot.image, PREVIEW_SIDE)
         shot.face = detect_face(shot.working) if self.settings.face_detect else None
-        shot.eye_t = format_eye_t(self.current_format())
-        shot.guides_manual = False
+        self._reset_shot_frame(shot)
         self._show_preview(shot.path)
         self.refresh()
 
@@ -3929,12 +3015,17 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def open_photo(self) -> None:
-        path, _selected = QFileDialog.getOpenFileName(self, "Открыть снимок", "", "Изображения (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff)")
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            "Открыть снимок",
+            self._dialog_folder(),
+            "Изображения (*.jpg *.jpeg *.png *.bmp *.webp *.tif *.tiff)",
+        )
         if path:
             self.open_paths([Path(path)], reset_job=False)
 
     def open_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Открыть папку")
+        folder = QFileDialog.getExistingDirectory(self, "Открыть папку", self._dialog_folder())
         if not folder:
             return
         self.folder_root = Path(folder)
@@ -3946,6 +3037,7 @@ class MainWindow(QMainWindow):
             self.doc = self._fresh_doc()
         self.shots = []
         self._bg_cache.clear()
+        self._alpha_cache.clear()
         self._live_cache.clear()
         self._sheet_pixmaps = {}
         for path in paths:
@@ -4114,6 +3206,7 @@ class MainWindow(QMainWindow):
             shot.tolerance = float(self.tolerance.value())
             shot.replace = self.replace_box.isChecked()
             self._schedule_preview()
+        self._fill_tune_menu()
         self._remember()
 
     def _load_tone(self, shot: Shot) -> None:
@@ -4160,6 +3253,15 @@ class MainWindow(QMainWindow):
         chosen = self.color_box.currentData()
         return self.current_format().background if chosen == "format" else str(chosen)
 
+    def _background_method(self) -> str:
+        if getattr(self, "fill_figure", None) is not None and self.fill_figure.isChecked():
+            return "figure"
+        return "edge"
+
+    def _paint_background(self) -> bool:
+        box = getattr(self, "paint_box", None)
+        return bool(box is not None and box.isChecked())
+
     def _schedule_preview(self) -> None:
         """Ползунок не ждёт пересчёт: кадр догоняет уже с последним значением."""
         timer = getattr(self, "_preview_timer", None)
@@ -4181,17 +3283,20 @@ class MainWindow(QMainWindow):
         self._show_finished(smooth=False)
         self._smooth_timer.start(60)
 
-    def _prepared_working(self, shot: Shot) -> Image.Image:
-        """Фон считается по уже уменьшенному снимку и не повторяется, пока не меняются порог и кисть."""
+    def _background_alpha(self, shot: Shot) -> np.ndarray | None:
+        """Маска фона по превью. Цвет заливки и ползунки её не пересчитывают."""
         if not shot.replace or shot.tolerance <= 0:
-            return shot.working
-        key = (id(shot.working), round(float(shot.tolerance)), int(self.settings.brush_px), self._background())
+            return None
+        face = shot.face
+        face_key = None if face is None else (round(face.x, 3), round(face.y, 3), round(face.w, 3), round(face.h, 3))
+        method = self._background_method()
+        key = (id(shot.working), round(float(shot.tolerance)), int(self.settings.brush_px), face_key, method)
         cached = self._bg_cache.get(id(shot))
         if cached is not None and cached[0] == key:
             return cached[1]
-        image = replace_background(shot.working, hex_to_rgb(self._background()), shot.tolerance, self.settings.brush_px)
-        self._bg_cache[id(shot)] = (key, image)
-        return image
+        alpha = background_alpha(shot.working, shot.tolerance, self.settings.brush_px, face, method)
+        self._bg_cache[id(shot)] = (key, alpha)
+        return alpha
 
     def _render(self, shot: Shot, image: Image.Image, dpi: int, corner: str = "none", grayscale: bool = False, prepared: bool = False, fmt: Format | None = None) -> Image.Image:
         fmt = self.current_format() if fmt is None else fmt
@@ -4223,20 +3328,41 @@ class MainWindow(QMainWindow):
             angle=shot.angle,
             brush=self.settings.brush_px,
             resample=Image.Resampling.BILINEAR if prepared else Image.Resampling.BICUBIC,
+            face=shot.face,
+            method=self._background_method(),
+            paint=self._paint_background(),
         )
+
+    def _show_head_share(self, shot: Shot | None, crop, guide) -> None:
+        """Процент кадра между верхней и нижней лапкой и та же длина в миллиметрах формата."""
+        label = getattr(self, "head_share", None)
+        if label is None:
+            return
+        if shot is None or crop is None or crop.height < 1:
+            label.setText("Голова —")
+            return
+        percent, mm = head_share(
+            crop,
+            self.current_format(),
+            shot.angle if self.allow_rotate else 0.0,
+            shot.eye_t,
+            guide,
+        )
+        label.setText(f"Голова {percent:.0f}% кадра · {mm:.0f} мм")
 
     def refresh(self) -> None:
         self._update_size_preview()
         shot = self.current_shot()
         if shot is None:
+            self._show_head_share(None, None, None)
             return
         crop = self._crop(shot)
         guide = self._shot_guide_ratios(shot, crop)
+        self._show_head_share(shot, crop, guide)
         self.source.set_frame(
             pil_to_pixmap(shot.working),
             crop,
             self.current_format(),
-            self.frame_box.isChecked(),
             shot.angle if self.allow_rotate else 0.0,
             shot.eye_t,
             guide,
@@ -4327,35 +3453,58 @@ class MainWindow(QMainWindow):
         """Обрезанный кадр до коррекции. Пока едут ползунки, обрезка не повторяется."""
         size = self._live_pixel_size()
         crop = self._crop(shot)
-        prepared = self._prepared_working(shot)
         angle = shot.angle if self.allow_rotate else 0.0
-        fill = self._background()
         key = (
-            id(prepared),
+            id(shot.working),
             round(crop.left, 2),
             round(crop.top, 2),
             round(crop.width, 2),
             round(crop.height, 2),
             round(float(angle), 2),
             size,
-            fill,
         )
         cached = self._live_cache.get(id(shot))
         if cached is not None and cached[0] == key:
             return cached[1]
-        scale_x = prepared.width / max(shot.working.width, 1)
-        scale_y = prepared.height / max(shot.working.height, 1)
-        scaled = type(crop)(crop.left * scale_x, crop.top * scale_y, crop.width * scale_x, crop.height * scale_y)
-        image = render_crop(prepared, scaled, size, hex_to_rgb(fill), angle, Image.Resampling.BILINEAR)
+        scaled = self._scaled_crop(shot, crop, shot.working.size)
+        image = render_crop(shot.working, scaled, size, hex_to_rgb(self._background()), angle, Image.Resampling.BILINEAR)
         array = np.ascontiguousarray(np.asarray(image.convert("RGB")))
         self._live_cache[id(shot)] = (key, array)
         return array
 
-    def _pixmap_from_array(self, array: np.ndarray) -> QPixmap:
-        rgb = np.ascontiguousarray(array)
-        height, width, _channels = rgb.shape
-        image = QImage(rgb.data, width, height, width * 3, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(image.copy())
+    def _scaled_crop(self, shot: Shot, crop, size: tuple[int, int]):
+        scale_x = size[0] / max(shot.working.width, 1)
+        scale_y = size[1] / max(shot.working.height, 1)
+        return type(crop)(crop.left * scale_x, crop.top * scale_y, crop.width * scale_x, crop.height * scale_y)
+
+    def _live_alpha(self, shot: Shot) -> np.ndarray | None:
+        """Та же обрезка, что у кадра, но для маски фона. Снаружи снимка — полная заливка."""
+        alpha = self._background_alpha(shot)
+        if alpha is None:
+            return None
+        size = self._live_pixel_size()
+        crop = self._crop(shot)
+        angle = shot.angle if self.allow_rotate else 0.0
+        key = (
+            id(shot.working),
+            round(float(shot.tolerance)),
+            int(self.settings.brush_px),
+            self._background_method(),
+            round(crop.left, 2),
+            round(crop.top, 2),
+            round(crop.width, 2),
+            round(crop.height, 2),
+            round(float(angle), 2),
+            size,
+        )
+        cached = self._alpha_cache.get(id(shot))
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        mask = Image.fromarray(np.clip(alpha * 255.0, 0, 255).astype(np.uint8), "L")
+        cropped = render_crop(mask, self._scaled_crop(shot, crop, mask.size), size, 255, angle, Image.Resampling.BILINEAR)
+        array = np.asarray(cropped).astype(np.float32) / 255.0
+        self._alpha_cache[id(shot)] = (key, array)
+        return array
 
     def _show_finished(self, smooth: bool = True) -> None:
         shot = self.current_shot()
@@ -4363,35 +3512,34 @@ class MainWindow(QMainWindow):
             self._finished_image = None
             self.finished.set_photo(QPixmap(), smooth)
             return
-        array = apply_tone_array(
-            self._live_base(shot),
-            shot.brightness,
-            shot.contrast,
-            self._wants_gray(),
-            shot.gamma,
-            shot.saturation,
-            shot.sharpness,
-            shot.black_point,
-            shot.white_point,
-            self._balance(),
+        base = self._live_base(shot)
+        preview = Image.fromarray(base, "RGB")
+        image = render_photo(
+            preview,
+            Rect(0, 0, preview.width, preview.height),
+            self.current_format(),
+            72,
+            replace=shot.replace,
+            tolerance=shot.tolerance,
+            brightness=shot.brightness,
+            contrast=shot.contrast,
+            grayscale=self._wants_gray(),
+            background=self._background(),
+            gamma=shot.gamma,
+            saturation=shot.saturation,
+            sharpness=shot.sharpness,
+            black_point=shot.black_point,
+            white_point=shot.white_point,
+            balance=self._balance(),
+            corner=self._corner_name(),
+            clothes=self._clothes_image(shot),
+            prepared_alpha=self._live_alpha(shot),
+            already_cropped=True,
+            method=self._background_method(),
+            paint=self._paint_background(),
         )
-        clothes = self._clothes_image(shot)
-        corner = self._corner_name()
-        if (clothes is not None and not self._wants_gray()) or corner not in {"", "none"}:
-            image = Image.fromarray(array, "RGB")
-            if clothes is not None and not self._wants_gray():
-                image = paste_clothes(image, clothes)
-            fmt = self.current_format()
-            fill = hex_to_rgb(self._background())
-            placement, kind, rx_mm, ry_mm = resolve_corner(fmt, corner)
-            rx_px = max(1, round(rx_mm / fmt.width_mm * image.width)) if fmt.width_mm else 1
-            ry_px = max(1, round(ry_mm / fmt.height_mm * image.height)) if fmt.height_mm else 1
-            image = apply_corner(image, placement, kind, rx_px, ry_px, fill)
-            array = np.asarray(image.convert("RGB"))
-            self._finished_image = image
-        else:
-            self._finished_image = Image.fromarray(array, "RGB")
-        self.finished.set_photo(self._pixmap_from_array(array), smooth)
+        self._finished_image = image
+        self.finished.set_photo(pil_to_pixmap(image), smooth)
 
     def _preview_source(self, shot: Shot) -> Image.Image:
         """Исходник, уменьшенный так, чтобы кадр на экране остался около 2000 пикселей по длинной стороне."""
@@ -4438,6 +3586,7 @@ class MainWindow(QMainWindow):
         shot.shift_x += dx
         shot.shift_y += dy
         self._contain(shot)
+        self._capture_ends(shot)
         self.refresh()
 
     def _zoom(self, factor: float) -> None:
@@ -4445,6 +3594,7 @@ class MainWindow(QMainWindow):
         if shot is None:
             return
         shot.zoom = max(ZOOM_MIN, min(ZOOM_MAX, shot.zoom * factor))
+        self._capture_ends(shot)
         self.refresh()
 
     def _nudge_guide(self, name: str, dx: float, dy: float) -> None:
@@ -4475,25 +3625,17 @@ class MainWindow(QMainWindow):
             shot.working.size, shot.face, fmt, left, top, crop_h, shot.eye_t
         )
         shot.angle = angle
+        if not fmt.two_points and fmt.face_height_mm > 0:
+            shot.eye_line = shot.eye_t
         self._contain(shot)
+        self._capture_ends(shot)
         self.refresh()
 
     def reset_frame(self) -> None:
         shot = self.current_shot()
         if shot is None:
             return
-        fmt = self.current_format()
-        shot.angle = 0.0
-        shot.eye_t = (
-            detected_eye_t(shot.face, shot.working.size, fmt)
-            if shot.face and not fmt.two_points and fmt.face_height_mm > 0
-            else format_eye_t(fmt)
-        )
-        shot.guides_manual = False
-        shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
-            shot.working.size, shot.face, fmt, shot.eye_t
-        )
-        self._contain(shot)
+        self._reset_shot_frame(shot)
         shot.brightness = shot.contrast = shot.gamma = shot.saturation = shot.sharpness = 0
         shot.black_point, shot.white_point = 0, 255
         self._load_tone(shot)
@@ -4815,6 +3957,8 @@ class MainWindow(QMainWindow):
             round(shot.white_point, 1),
             round(shot.tolerance, 2),
             bool(shot.replace),
+            self._background_method(),
+            self._paint_background(),
             shot.clothes,
             round(shot.eye_t, 3),
             ready.format_id,
@@ -4844,10 +3988,9 @@ class MainWindow(QMainWindow):
             return stored[1]
         image = self._saved_sheet_image(item, 640)
         if image is None and shot is not None and fmt is not None:
-            source = self._prepared_working(shot) if shot.replace else shot.working
             long_mm = max(fmt.width_mm, fmt.height_mm, 1.0)
             dpi = max(72, int(round(640 * 25.4 / long_mm)))
-            image = self._render(shot, source, dpi, ready.corner, ready.grayscale, prepared=True, fmt=fmt)
+            image = self._render(shot, shot.working, dpi, ready.corner, ready.grayscale, fmt=fmt)
         if image is None:
             return None
         pixmap = pil_to_pixmap(image)
@@ -5053,6 +4196,18 @@ class MainWindow(QMainWindow):
             self.replace_box.blockSignals(True)
             self.replace_box.setChecked(bool(self.settings.replace_background))
             self.replace_box.blockSignals(False)
+        if hasattr(self, "fill_figure"):
+            figure = getattr(self.settings, "background_method", "edge") == "figure"
+            self.fill_figure.blockSignals(True)
+            self.fill_edge.blockSignals(True)
+            self.fill_figure.setChecked(figure)
+            self.fill_edge.setChecked(not figure)
+            self.fill_figure.blockSignals(False)
+            self.fill_edge.blockSignals(False)
+        if hasattr(self, "paint_box"):
+            self.paint_box.blockSignals(True)
+            self.paint_box.setChecked(bool(getattr(self.settings, "paint_background", False)))
+            self.paint_box.blockSignals(False)
         if self.settings.file_panel_width >= 180:
             sizes = self.splitter.sizes()
             if len(sizes) == 3:
@@ -5314,10 +4469,43 @@ class MainWindow(QMainWindow):
         self._sync_tone_numbers()
         self._store_tone()
 
-    def _apply_quick_tune(self) -> None:
-        tone = self.tune_box.currentData()
-        if not isinstance(tone, dict):
+    def _tone_mark(self, tone: dict) -> tuple:
+        keys = ("brightness", "contrast", "gamma", "saturation", "sharpness", "black", "white", "tolerance")
+        numbers = tuple(int(tone.get(key, 0)) for key in keys)
+        replace = bool(tone.get("replace", False))
+        balance = tuple(tuple(int(value) for value in row) for row in tone.get("balance", []))
+        return numbers + (replace, balance)
+
+    def _matching_tune_name(self) -> str:
+        if not hasattr(self, "bright"):
+            return ""
+        current = self._tone_mark(self._tone_snapshot())
+        for item in self._tunes:
+            if self._tone_mark(item["tone"]) == current:
+                return item["name"]
+        return ""
+
+    def _fill_tune_menu(self) -> None:
+        menu = getattr(self, "tune_menu", None)
+        if menu is None:
             return
+        menu.clear()
+        current = self._matching_tune_name()
+        for item in self._tunes:
+            action = menu.addAction(item["name"])
+            action.setCheckable(True)
+            action.setChecked(item["name"] == current)
+            action.triggered.connect(lambda _checked=False, tone=item["tone"]: self._apply_saved_tune(tone))
+        menu.addSeparator()
+        save = menu.addAction("Записать")
+        save.setEnabled(bool(current))
+        save.triggered.connect(self._update_quick_tune)
+        menu.addAction("Добавить").triggered.connect(self._add_quick_tune)
+        delete = menu.addAction("Удалить")
+        delete.setEnabled(bool(current))
+        delete.triggered.connect(self._delete_quick_tune)
+
+    def _apply_saved_tune(self, tone: dict) -> None:
         if self.current_shot() is None:
             self.statusBar().showMessage("Сначала откройте снимок")
             return
@@ -5327,33 +4515,28 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "Быстрая настройка", "Название")
         if not ok or not name.strip():
             return
-        tone = self._tone_snapshot()
-        self.quick_tunes.append(tone)
-        self.tune_box.blockSignals(True)
-        self.tune_box.addItem(name.strip(), tone)
-        self.tune_box.setCurrentIndex(self.tune_box.count() - 1)
-        self.tune_box.blockSignals(False)
+        self._tunes.append({"name": name.strip(), "tone": self._tone_snapshot()})
+        self._fill_tune_menu()
         self._remember()
         self.statusBar().showMessage(f"Настройка «{name.strip()}» записана")
 
     def _update_quick_tune(self) -> None:
-        index = self.tune_box.currentIndex()
-        tone = self.tune_box.currentData()
-        if not isinstance(tone, dict):
-            self.statusBar().showMessage("Выберите настройку в списке")
-            return
-        fresh = self._tone_snapshot()
-        tone.clear()
-        tone.update(fresh)
-        self.tune_box.setItemData(index, tone)
-        self._remember()
-        self.statusBar().showMessage("Настройка обновлена")
+        name = self._matching_tune_name()
+        for item in self._tunes:
+            if item["name"] == name:
+                item["tone"] = self._tone_snapshot()
+                self._fill_tune_menu()
+                self._remember()
+                self.statusBar().showMessage("Настройка обновлена")
+                return
+        self.statusBar().showMessage("Сначала выберите настройку, которая совпадает с ползунками")
 
     def _delete_quick_tune(self) -> None:
-        index = self.tune_box.currentIndex()
-        if not isinstance(self.tune_box.currentData(), dict):
+        name = self._matching_tune_name()
+        if not name:
             return
-        self.tune_box.removeItem(index)
+        self._tunes = [item for item in self._tunes if item["name"] != name]
+        self._fill_tune_menu()
         self._remember()
 
     def _journal(self) -> None:

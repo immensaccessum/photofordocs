@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPalette, QTransform
 from PySide6.QtWidgets import QWidget
 
 from photofordocs.imageops import guide_ratios
@@ -105,7 +105,7 @@ class PrintCanvas(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
-        painter.fillRect(self.rect(), QColor("#c8c8c8"))
+        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
         width, height = paper_mm(self.doc)
         paper = QRectF(self.pan.x(), self.pan.y(), width * self.zoom, height * self.zoom)
         top, right, bottom, left = sheet_edges(self.doc)
@@ -212,16 +212,17 @@ class PrintCanvas(QWidget):
         horizontal = QRectF(paper.left(), paper.top() - thickness, paper.width(), thickness)
         vertical = QRectF(paper.left() - thickness, paper.top(), thickness, paper.height())
         corner = QRectF(paper.left() - thickness, paper.top() - thickness, thickness, thickness)
-        painter.fillRect(horizontal, QColor("#f4f4f4"))
-        painter.fillRect(vertical, QColor("#f4f4f4"))
-        painter.fillRect(corner, QColor("#ececec"))
-        painter.setPen(QPen(QColor("#9a9a9a"), 1))
+        ruler = self.palette().color(QPalette.ColorRole.Base)
+        painter.fillRect(horizontal, ruler)
+        painter.fillRect(vertical, ruler)
+        painter.fillRect(corner, self.palette().color(QPalette.ColorRole.Window))
+        painter.setPen(QPen(self.palette().color(QPalette.ColorRole.Mid), 1))
         painter.drawRect(horizontal)
         painter.drawRect(vertical)
         font = QFont(painter.font())
         font.setPixelSize(9)
         painter.setFont(font)
-        painter.setPen(QColor("#333"))
+        painter.setPen(self.palette().color(QPalette.ColorRole.Text))
         minor_mm = 50
         for candidate in (1, 2, 5, 10, 20, 50):
             if candidate * self.zoom >= 4:
@@ -775,7 +776,6 @@ class SourceCanvas(ViewCanvas, QWidget):
         self.pixmap: QPixmap | None = None
         self.crop = None
         self.fmt = None
-        self.show_frame = True
         self.angle = 0.0
         self.eye_t = 0.55
         self.guide_lines: tuple[float, float, float] | None = None
@@ -795,7 +795,6 @@ class SourceCanvas(ViewCanvas, QWidget):
         pixmap: QPixmap,
         crop,
         fmt,
-        show_frame: bool,
         angle: float = 0.0,
         eye_t: float = 0.55,
         guide: tuple[float, float, float] | None = None,
@@ -804,7 +803,6 @@ class SourceCanvas(ViewCanvas, QWidget):
         self.pixmap = pixmap
         self.crop = crop
         self.fmt = fmt
-        self.show_frame = show_frame
         self.angle = angle
         self.eye_t = eye_t
         self.guide_lines = guide
@@ -816,47 +814,49 @@ class SourceCanvas(ViewCanvas, QWidget):
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#d7d7d7"))
+        painter.fillRect(self.rect(), self.palette().color(QPalette.ColorRole.Window))
         if self.pixmap is None or self.crop is None or self.fmt is None:
-            painter.setPen(QColor("#333"))
+            painter.setPen(self.palette().color(QPalette.ColorRole.WindowText))
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Откройте снимок или папку")
             painter.end()
             return
         scale, ox, oy = self._fit()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, self._view_drag is None)
-        painter.drawPixmap(QRectF(ox, oy, self.pixmap.width() * scale, self.pixmap.height() * scale), self.pixmap, QRectF(self.pixmap.rect()))
-        if self.show_frame:
-            rect = self._frame_rect()
-            painter.save()
-            painter.translate(rect.center())
-            painter.rotate(self.angle)
-            painter.translate(-rect.center())
-            painter.setPen(QPen(QColor("white"), 1))
-            painter.drawRect(rect.adjusted(-1, -1, -1, -1))
-            painter.setPen(QPen(QColor("#111"), 1, Qt.PenStyle.DashLine))
-            painter.drawRect(rect)
-            painter.setPen(QPen(QColor("#222"), 1))
-            ratios = self._shown_guides()
-            for ratio in ratios.values():
-                y = rect.top() + ratio * rect.height()
-                painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
-            painter.drawLine(int(rect.center().x()), int(rect.top()), int(rect.center().x()), int(rect.bottom()))
-            crown_y = rect.top() + ratios["crown"] * rect.height()
-            chin_y = rect.top() + ratios["chin"] * rect.height()
-            head_h = chin_y - crown_y
-            oval_w = head_h * 0.75
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            painter.setPen(QPen(QColor("white"), 3))
-            painter.drawEllipse(QRectF(rect.center().x() - oval_w / 2, crown_y, oval_w, head_h))
-            painter.setPen(QPen(QColor("#222"), 1))
-            painter.drawEllipse(QRectF(rect.center().x() - oval_w / 2, crown_y, oval_w, head_h))
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            painter.setPen(QPen(QColor("#111"), 1))
-            painter.setBrush(QColor("white"))
-            for handle in self._handles().values():
-                painter.drawRect(QRectF(handle.x() - 4, handle.y() - 4, 8, 8))
-            painter.restore()
+        photo = QRectF(ox, oy, self.pixmap.width() * scale, self.pixmap.height() * scale)
+        painter.drawPixmap(photo, self.pixmap, QRectF(self.pixmap.rect()))
+        rect = self._frame_rect()
+        self._shade_outside(painter, photo, rect)
+        painter.save()
+        painter.translate(rect.center())
+        painter.rotate(self.angle)
+        painter.translate(-rect.center())
+        painter.setPen(QPen(QColor("white"), 1))
+        painter.drawRect(rect.adjusted(-1, -1, -1, -1))
+        painter.setPen(QPen(QColor("#111"), 1, Qt.PenStyle.DashLine))
+        painter.drawRect(rect)
+        painter.setPen(QPen(QColor("#222"), 1))
+        ratios = self._shown_guides()
+        for ratio in ratios.values():
+            y = rect.top() + ratio * rect.height()
+            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+        painter.drawLine(int(rect.center().x()), int(rect.top()), int(rect.center().x()), int(rect.bottom()))
+        crown_y = rect.top() + ratios["crown"] * rect.height()
+        chin_y = rect.top() + ratios["chin"] * rect.height()
+        head_h = chin_y - crown_y
+        oval_w = head_h * 0.75
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("white"), 3))
+        painter.drawEllipse(QRectF(rect.center().x() - oval_w / 2, crown_y, oval_w, head_h))
+        painter.setPen(QPen(QColor("#222"), 1))
+        painter.drawEllipse(QRectF(rect.center().x() - oval_w / 2, crown_y, oval_w, head_h))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#4a4a4a"), 1))
+        painter.setBrush(QColor("white"))
+        for handle in self._handles().values():
+            painter.drawEllipse(QRectF(handle.x() - 7, handle.y() - 7, 14, 14))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.restore()
         if len(self.ruler_points) == 2 and self.crop is not None:
             painter.setPen(QPen(QColor("#9a3412"), 2))
             a, b = self.ruler_points
@@ -911,6 +911,25 @@ class SourceCanvas(ViewCanvas, QWidget):
         self._handle = None
         self.setCursor(Qt.CursorShape.OpenHandCursor if self.space_held else Qt.CursorShape.ArrowCursor)
 
+    def _shade_outside(self, painter: QPainter, photo: QRectF, rect: QRectF) -> None:
+        """Как в PhotoLab: всё, что осталось за рамкой кадрирования, темнее."""
+        outside = QPainterPath()
+        outside.addRect(photo)
+        hole = QPainterPath()
+        hole.addRect(rect)
+        if abs(self.angle) > 1e-3:
+            center = rect.center()
+            turn = QTransform()
+            turn.translate(center.x(), center.y())
+            turn.rotate(self.angle)
+            turn.translate(-center.x(), -center.y())
+            hole = turn.map(hole)
+        painter.save()
+        painter.setClipRect(photo)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillPath(outside.subtracted(hole), QColor(0, 0, 0, 90))
+        painter.restore()
+
     def _frame_rect(self) -> QRectF:
         scale, ox, oy = self._fit()
         return QRectF(ox + self.crop.left * scale, oy + self.crop.top * scale, self.crop.width * scale, self.crop.height * scale)
@@ -940,7 +959,7 @@ class SourceCanvas(ViewCanvas, QWidget):
         return QPointF(center.x() + dx * c - dy * s, center.y() + dx * s + dy * c)
 
     def _hit(self, point: QPoint) -> str | None:
-        if not self.show_frame or self.crop is None or self.fmt is None or self.pixmap is None:
+        if self.crop is None or self.fmt is None or self.pixmap is None:
             return None
         local = self._unrotate(point)
         found = None

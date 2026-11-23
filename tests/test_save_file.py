@@ -12,7 +12,7 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import QApplication
 
 from photofordocs.imageops import write_jpeg
-from photofordocs.window import SaveFileDialog
+from photofordocs.dialogs import SaveFileDialog
 
 
 class SaveFileTest(unittest.TestCase):

@@ -32,8 +32,20 @@ from photofordocs.sheet import PAPERS, plan_sheet, render_document, render_sheet
 class FormatCatalogTest(unittest.TestCase):
     def test_builtin_formats_fit_on_10x15(self) -> None:
         formats = load_formats()
-        self.assertGreaterEqual(len(formats), 40)
-        self.assertEqual(formats[0].id, "passport-rf")
+        ids = {fmt.id for fmt in formats}
+        core = {
+            "passport-rf-2013",
+            "photo-3x4-color",
+            "photo-9x12-color",
+            "photo-4x6-no-corner",
+            "photo-3x4-bw",
+            "photo-3x4-corner-right",
+            "photo-45x60-no-corner",
+            "military-ticket-enlisted",
+            "photo-9x12",
+            "photo-3x4-corner-left",
+        }
+        self.assertTrue(core <= ids)
         paper = next(item for item in PAPERS if item.id == "10x15")
         for fmt in formats:
             if not fmt.builtin:
@@ -135,6 +147,30 @@ class CropTest(unittest.TestCase):
         high = pose_from_ends(fmt, crown, chin, False, 0.75)[2]
         self.assertGreater(low, high)
 
+    def test_three_point_frame_matches_photolab_3x4(self) -> None:
+        """Скриншот PhotoLab, преднастройка 3×4: те же точки дают ту же рамку.
+
+        Масштаб — глаза–подбородок / 12 мм. Высота рамки — 40 мм этого масштаба,
+        верх — 4 мм над макушкой. Нижнее поле 4 мм не подтягивает подбородок.
+        """
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-color")
+        crown = (298.0, 272.0)
+        chin = (298.0, 565.0)
+        eye_t = (416.0 - 272.0) / (565.0 - 272.0)
+        left, top, height, angle = pose_from_ends(fmt, crown, chin, False, eye_t)
+        scale = (565.0 - 416.0) / fmt.face_height_mm
+        self.assertEqual(angle, 0.0)
+        self.assertAlmostEqual(height, fmt.height_mm * scale, places=2)
+        self.assertAlmostEqual(top, 272.0 - fmt.overhead2_mm * scale, places=2)
+        self.assertAlmostEqual(height, 496.67, delta=0.1)
+        self.assertAlmostEqual(top, 222.33, delta=0.1)
+        self.assertAlmostEqual((left + height * fmt.aspect / 2), 298.0, places=2)
+        box = Rect(left, top, height * fmt.aspect, height)
+        points = frame_points(box, fmt, 0.0, eye_t)
+        self.assertAlmostEqual(points["crown"][1], 272.0, places=2)
+        self.assertAlmostEqual(points["eyes"][1], 416.0, places=2)
+        self.assertAlmostEqual(points["chin"][1], 565.0, places=2)
+
     def test_corner_right_crop_matches_head_field(self) -> None:
         color = next(item for item in load_formats() if item.id == "photo-3x4-color")
         fmt = next(item for item in load_formats() if item.id == "photo-3x4-corner-right")
@@ -187,7 +223,7 @@ class CropTest(unittest.TestCase):
         self.assertAlmostEqual(chin_gap, fmt.chin_ratio, places=3)
 
     def test_landmark_head_lands_on_guides(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        fmt = next(item for item in load_formats() if item.id == "passport-rf-2013")
         face = FaceBox(
             0.35,
             0.22,
@@ -209,7 +245,7 @@ class CropTest(unittest.TestCase):
         self.assertLess(eye_line, 0.75)
 
     def test_handles_resize_shift_and_tilt(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        fmt = next(item for item in load_formats() if item.id == "passport-rf-2013")
         face = FaceBox(0.35, 0.30, 0.30, 0.34)
         size = (1000, 1200)
         crop = place_crop(size, face, fmt)
@@ -241,7 +277,7 @@ class CropTest(unittest.TestCase):
         self.assertAlmostEqual(back.top, crop.top - 8, places=2)
 
     def test_shrinking_past_the_old_limit_keeps_the_frame(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "3-x-4-levyj-ugol")
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-corner-left")
         face = FaceBox(0.4, 0.2, 0.25, 0.3)
         size = (800, 1000)
         base = place_crop(size, face, fmt)
@@ -272,20 +308,22 @@ class CropTest(unittest.TestCase):
         self.assertEqual(stayed_chin, tilted_chin)
         self.assertGreaterEqual(fraction, 0.1)
         self.assertLessEqual(fraction, 0.9)
-        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        fmt = next(item for item in load_formats() if item.id == "passport-rf-2013")
         _left, _top, near, _angle = pose_from_ends(fmt, crown, chin, False, 0.2)
         left, top, far, _angle = pose_from_ends(fmt, crown, chin, False, 0.8)
         self.assertGreater(near, far)
         head = abs(chin[1] - crown[1])
         _left, _top, nominal, _angle = pose_from_ends(fmt, crown, chin, False, 0.55)
-        self.assertAlmostEqual(nominal, head / fmt.head_ratio, places=2)
+        scale = head * 0.45 / fmt.face_height_mm
+        expected = head + (fmt.height_mm * fmt.crown_ratio + fmt.crop_under_mm) * scale
+        self.assertAlmostEqual(nominal, expected, places=2)
         crop = Rect(left, top, far * fmt.aspect, far)
         points = frame_points(crop, fmt, 0.0, 0.8)
         self.assertAlmostEqual(points["crown"][1], crown[1], places=2)
         self.assertAlmostEqual(points["chin"][1], chin[1], places=2)
 
     def test_guides_stay_on_the_photo(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        fmt = next(item for item in load_formats() if item.id == "passport-rf-2013")
         face = FaceBox(0.35, 0.30, 0.30, 0.34)
         size = (1000, 1200)
         shift_x, shift_y = contain_guides(size, face, fmt, 1.0, -5.0, 0.0)
@@ -306,10 +344,80 @@ class BackgroundTest(unittest.TestCase):
         self.assertGreater(pixels[2, 2][0], 245)
         self.assertLess(pixels[100, 180][0], 40)
 
+    def test_gradient_backdrop_fills_and_head_stays(self) -> None:
+        image = Image.new("RGB", (240, 300), (210, 214, 218))
+        draw = ImageDraw.Draw(image)
+        for y in range(300):
+            shade = 250 - int(70 * y / 300)
+            draw.line((0, y, 239, y), fill=(shade, shade, shade + 4))
+        draw.ellipse((80, 40, 160, 140), fill=(214, 164, 132))
+        draw.rectangle((70, 130, 170, 280), fill=(30, 30, 34))
+        face = FaceBox(80 / 240, 40 / 300, 80 / 240, 100 / 300, eyes_x=0.5, eyes_y=0.28, mouth_y=0.38)
+        result = replace_background(image, (0, 0, 255), tolerance=42, face=face)
+        pixels = result.load()
+        self.assertEqual(pixels[4, 4], (0, 0, 255))
+        self.assertEqual(pixels[230, 8], (0, 0, 255))
+        self.assertEqual(pixels[16, 90], (0, 0, 255))
+        cheek = pixels[120, 90]
+        self.assertGreater(cheek[0], 150)
+        self.assertLess(cheek[2], 160)
+        self.assertLess(pixels[120, 200][0], 50)
+
+    def test_filled_background_ignores_tone(self) -> None:
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-color")
+        image = Image.new("RGB", (120, 160), (180, 190, 200))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((40, 50, 80, 130), fill=(20, 20, 30))
+        crop = place_crop(image.size, None, fmt)
+        plain = render_photo(
+            image,
+            crop,
+            fmt,
+            72,
+            replace=True,
+            tolerance=40,
+            brightness=0,
+            contrast=0,
+            grayscale=False,
+            background="#0000FF",
+        )
+        bright = render_photo(
+            image,
+            crop,
+            fmt,
+            72,
+            replace=True,
+            tolerance=40,
+            brightness=80,
+            contrast=40,
+            grayscale=False,
+            background="#0000FF",
+            gamma=30,
+        )
+        # Без замены цвета фон остаётся как на снимке и не светлеет вместе с лицом.
+        self.assertEqual(plain.getpixel((1, 1)), (180, 190, 200))
+        self.assertEqual(bright.getpixel((1, 1)), (180, 190, 200))
+        self.assertNotEqual(plain.getpixel((plain.width // 2, plain.height // 2)), bright.getpixel((bright.width // 2, bright.height // 2)))
+        painted = render_photo(
+            image,
+            crop,
+            fmt,
+            72,
+            replace=True,
+            tolerance=40,
+            brightness=80,
+            contrast=40,
+            grayscale=False,
+            background="#0000FF",
+            gamma=30,
+            paint=True,
+        )
+        self.assertEqual(painted.getpixel((1, 1)), (0, 0, 255))
+
 
 class SheetTest(unittest.TestCase):
     def test_passport_sheet_has_several_copies(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "passport-rf")
+        fmt = next(item for item in load_formats() if item.id == "passport-rf-2013")
         paper = next(item for item in PAPERS if item.id == "10x15")
         plan = plan_sheet(fmt, paper)
         self.assertGreaterEqual(plan.count, 4)
@@ -396,13 +504,13 @@ class ReadyFolderTest(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["name"], "Паспорт РФ (2013)")
             self.assertTrue(records[0]["printed"])
-            self.assertEqual(records[0]["format_id"], "jp_41")
+            self.assertEqual(records[0]["format_id"], "passport-rf-2013")
             other = read_ready(neighbor, stems, names)
             self.assertEqual(other[0]["name"], "3 х 4 цветная")
             self.assertFalse(other[0]["printed"])
 
     def test_format_corner_is_a_real_cut_not_a_speck(self) -> None:
-        fmt = next(item for item in load_formats() if item.id == "3-x-4-levyj-ugol")
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-corner-left")
         placement, kind, rx_mm, ry_mm = resolve_corner(fmt, "format")
         self.assertEqual((placement, kind, rx_mm, ry_mm), (2, 2, 13.0, 13.0))
         image = Image.new("RGB", (270, 340), (20, 20, 20))
@@ -420,7 +528,7 @@ class ReadyFolderTest(unittest.TestCase):
         self.assertGreater(straight.getpixel((0, 339))[0], 240)
         self.assertGreater(straight.getpixel((8, 332))[0], 240)
         self.assertLess(straight.getpixel((rx - 2, 340 - ry + 2))[0], 40)
-        plain = next(item for item in load_formats() if item.id == "passport-rf")
+        plain = next(item for item in load_formats() if item.id == "passport-rf-2013")
         self.assertEqual(resolve_corner(plain, "format")[0], 0)
         self.assertEqual(resolve_corner(plain, "straight-right")[:2], (8, 0))
 

@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from PIL import Image
 from PySide6.QtWidgets import QApplication
 
+from photofordocs.imageops import FaceBox
 from photofordocs.session import ReadyItem, SheetItem
 from photofordocs.window import MainWindow, Shot
 
@@ -55,6 +56,56 @@ class SheetPreviewCacheTest(unittest.TestCase):
             fmt = window.current_format()
             self.assertEqual(fmt.corner_rx_mm, 7.5)
             self.assertEqual(fmt.corner_ry_mm, 7.5)
+        finally:
+            window.close()
+            self._app.processEvents()
+
+    def test_format_switch_keeps_the_paws_until_another_photo(self) -> None:
+        window = MainWindow()
+        window._save_left_sizes = lambda: None
+        try:
+            face = FaceBox(0.35, 0.22, 0.30, 0.42, eyes_x=0.5, eyes_y=0.45, mouth_y=0.58)
+            image = Image.new("RGB", (800, 1000), (200, 200, 210))
+            shot = Shot(Path("a.jpg"), image, image, face)
+            other = Shot(Path("b.jpg"), image, image, face)
+            window.shots = [shot, other]
+            window.index = 0
+            window.format_box.setCurrentIndex(window.format_box.findData("photo-3x4-color"))
+            window._nudge_guide("crown", 0, -40)
+            crown, chin = shot.crown, shot.chin
+            self.assertIsNotNone(crown)
+            window.format_box.setCurrentIndex(window.format_box.findData("passport-rf-2013"))
+            self.assertAlmostEqual(shot.crown[0], crown[0], delta=1.5)
+            self.assertAlmostEqual(shot.crown[1], crown[1], delta=1.5)
+            self.assertAlmostEqual(shot.chin[1], chin[1], delta=1.5)
+            window.format_box.setCurrentIndex(window.format_box.findData("photo-3x4-color"))
+            self.assertAlmostEqual(shot.crown[1], crown[1], delta=1.5)
+            self.assertAlmostEqual(shot.chin[1], chin[1], delta=1.5)
+            self.assertTrue(shot.guides_manual)
+            window._load_source(other.path)
+            window._load_source(shot.path)
+            self.assertFalse(shot.guides_manual)
+            self.assertGreater(abs(shot.crown[1] - crown[1]), 10)
+        finally:
+            window.close()
+            self._app.processEvents()
+
+    def test_head_share_is_the_gap_between_the_paws(self) -> None:
+        window = MainWindow()
+        window._save_left_sizes = lambda: None
+        try:
+            face = FaceBox(0.35, 0.22, 0.30, 0.42, eyes_x=0.5, eyes_y=0.45, mouth_y=0.58)
+            image = Image.new("RGB", (800, 1000), (200, 200, 210))
+            shot = Shot(Path("a.jpg"), image, image, face)
+            window.shots = [shot]
+            window.index = 0
+            window.format_box.setCurrentIndex(window.format_box.findData("photo-3x4-color"))
+            window.refresh()
+            self.assertIn("% кадра", window.head_share.text())
+            before = window.head_share.text()
+            window._nudge_guide("eyes", 0, -30)
+            self.assertNotEqual(window.head_share.text(), before)
+            self.assertIn("% кадра", window.head_share.text())
         finally:
             window.close()
             self._app.processEvents()

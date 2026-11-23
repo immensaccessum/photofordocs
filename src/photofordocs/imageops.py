@@ -43,6 +43,7 @@ class FaceBox:
     eyes_x: float | None = None
     eyes_y: float | None = None
     mouth_y: float | None = None
+    crown_y: float | None = None
 
 
 _CHIN_BELOW_MOUTH = 0.52
@@ -92,6 +93,11 @@ def head_pose_pixels(
         crown_y = max(crown_highest, min(crown_y, crown_hairline))
         crown_y = max(0.0, crown_y)
         chin_y = min(float(height - 1), max(chin_y, mouth_y + 6.0))
+        if face.crown_y is not None:
+            hair = float(face.crown_y) * height
+            # Верх волос, а не линия, где волосы встречаются со лбом.
+            if 0.0 <= hair < eye_y - 4.0:
+                crown_y = min(crown_y, hair)
         return crown_y, eye_y, chin_y, center_x
     chin_y = (face.y + face.h * 0.98) * height
     crown_y = (face.y - face.h * 0.42) * height
@@ -134,6 +140,44 @@ def downscale(image: Image.Image, max_side: int) -> Image.Image:
 
 
 _FACE_MODEL = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
+_PERSON_MODEL = Path(__file__).resolve().parent / "models" / "modnet_photographic_portrait_matting.onnx"
+_person_net: cv2.dnn.Net | None = None
+
+
+def _hair_crown_y(
+    image: Image.Image,
+    face_x: float,
+    face_y: float,
+    face_w: float,
+    face_h: float,
+    eyes_y: float,
+) -> float | None:
+    """Доля высоты снимка до верха волос над лицом. None, если силуэт не читается."""
+    matte = person_matte(image)
+    if matte is None:
+        return None
+    height, width = matte.shape
+    center_x = face_x + face_w / 2.0
+    half = max(face_w * 0.45, 4.0)
+    x0 = max(0, int(round(center_x - half)))
+    x1 = min(width, int(round(center_x + half)))
+    y1 = min(height, int(round(eyes_y)))
+    if x1 - x0 < 4 or y1 < 4:
+        return None
+    region = matte[:y1, x0:x1]
+    span = x1 - x0
+    rows = np.where((region > 0.22).sum(axis=1) >= max(3, span // 8))[0]
+    if len(rows) == 0:
+        return None
+    top = int(rows[0])
+    box_top = int(round(face_y))
+    if top < box_top:
+        bridge = region[top:box_top]
+        if bridge.size and float((bridge > 0.22).mean()) < 0.08:
+            return None
+    # Чуть выше найденного края, чтобы лапка не врезалась в верхние волосы.
+    top -= int(round(face_h * 0.04))
+    return max(0.0, top) / height
 
 
 def detect_face(image: Image.Image) -> FaceBox | None:
@@ -159,6 +203,7 @@ def detect_face(image: Image.Image) -> FaceBox | None:
         eyes_x=eyes_x,
         eyes_y=eyes_y,
         mouth_y=mouth_y,
+        crown_y=_hair_crown_y(image, x, y, face_w, face_h, (re_y + le_y) / 2.0),
     )
 
 
@@ -229,25 +274,17 @@ def _crop_from_head_span(
     fmt: Format,
     eye_t: float | None = None,
 ) -> Rect:
-    """Трёхточечный кадр: макушка–подбородок + поля, как pose_from_ends при открытии снимка."""
-    head_px = max(chin_y - crown_y, 1.0)
+    """Трёхточечный кадр, как pose_from_ends при открытии снимка."""
     if eye_t is None:
         eye_t = format_eye_t(fmt)
-    eye_t = min(0.9, max(0.1, eye_t))
-    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
-    face_mm = max(face_mm, 0.1)
-    if not fmt.two_points:
-        overhead = fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
-    else:
-        overhead = fmt.height_mm * fmt.crown_ratio
-    under = fmt.crop_under_mm
-    scale = head_px * (1.0 - eye_t) / face_mm
-    crop_h = head_px + (overhead + under) * scale
-    crop_w = crop_h * fmt.aspect
-    crown_r, _eye_r, _chin_r = guide_ratios(fmt, eye_t)
-    top = crown_y - crown_r * crop_h
-    left = center_x - crop_w / 2
-    return Rect(left, top, crop_w, crop_h)
+    left, top, crop_h, _angle = pose_from_ends(
+        fmt,
+        (center_x, crown_y),
+        (center_x, chin_y),
+        False,
+        eye_t,
+    )
+    return Rect(left, top, crop_h * fmt.aspect, crop_h)
 
 
 def place_crop(
@@ -317,18 +354,21 @@ def format_eye_t(fmt: Format) -> float:
 def guide_ratios(fmt: Format, eye_t: float = 0.55) -> tuple[float, float, float]:
     """Доли макушки, глаз и подбородка внутри рамки.
 
-    Как в трёхточечном кадре 4.54: масштаб — это расстояние глаза–подбородок,
-    делённое на лицевую высоту формата. Поля над макушкой и под подбородком
-    умножаются на этот масштаб. На линии глаз формата (0.55) доли совпадают
-    с полями формата. Сдвиг глаз меняет поля, и рамка меняет высоту.
+    Трёхточечный кадр PhotoLab: масштаб — расстояние глаза–подбородок,
+    делённое на лицевую высоту. Высота рамки равна высоте формата в этом
+    масштабе, макушка стоит на верхнем поле. Подбородок попадает на нижнее
+    поле только когда глаза стоят на линии формата. Сдвиг глаз меняет масштаб
+    и высоту рамки, сами точки макушки и подбородка остаются на месте.
+    Двухточечный кадр по-прежнему держит оба конца на полях формата.
     """
     eye_t = min(0.9, max(0.1, eye_t))
-    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
-    face_mm = max(face_mm, 0.1)
-    if not fmt.two_points:
-        overhead = fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
-    else:
-        overhead = fmt.height_mm * fmt.crown_ratio
+    face_mm = _face_mm(fmt)
+    overhead = _overhead_mm(fmt)
+    if not fmt.two_points and fmt.face_height_mm > 0:
+        height = max(fmt.height_mm, 0.1)
+        crown = overhead / height
+        head_span = face_mm / ((1.0 - eye_t) * height)
+        return crown, crown + eye_t * head_span, crown + head_span
     under = fmt.crop_under_mm
     scale_per_head = (1.0 - eye_t) / face_mm
     span = 1.0 + (overhead + under) * scale_per_head
@@ -336,6 +376,17 @@ def guide_ratios(fmt: Format, eye_t: float = 0.55) -> tuple[float, float, float]
     chin = (overhead * scale_per_head + 1.0) / span
     eyes = (overhead * scale_per_head + eye_t) / span
     return crown, eyes, chin
+
+
+def _face_mm(fmt: Format) -> float:
+    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
+    return max(face_mm, 0.1)
+
+
+def _overhead_mm(fmt: Format) -> float:
+    if not fmt.two_points:
+        return fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
+    return fmt.height_mm * fmt.crown_ratio
 
 
 def frame_points(
@@ -396,6 +447,30 @@ def move_middle(
     return (ax, ay), (bx, by), fraction
 
 
+def ends_eye_t(fmt: Format, eye_line: float) -> float:
+    """Средняя лапка остаётся в трёхточечном формате. Двухточечный берёт линию глаз из каталога."""
+    if fmt.two_points or fmt.face_height_mm <= 0:
+        return format_eye_t(fmt)
+    return eye_line
+
+
+def head_share(
+    crop: Rect,
+    fmt: Format,
+    angle: float = 0.0,
+    eye_t: float = 0.55,
+    guide: tuple[float, float, float] | None = None,
+) -> tuple[float, float]:
+    """Процент высоты кадра между верхней и нижней лапкой и та же длина в миллиметрах формата."""
+    if crop.height < 1:
+        return 0.0, 0.0
+    points = frame_points(crop, fmt, angle, eye_t, guide)
+    dx = points["chin"][0] - points["crown"][0]
+    dy = points["chin"][1] - points["crown"][1]
+    percent = math.hypot(dx, dy) / crop.height * 100.0
+    return percent, percent / 100.0 * fmt.height_mm
+
+
 def pose_from_ends(
     fmt: Format,
     crown: tuple[float, float],
@@ -405,8 +480,9 @@ def pose_from_ends(
 ) -> tuple[float, float, float, float]:
     """Прямоугольник рамки: левый край, верх, высота, угол.
 
-    Высота — расстояние макушка–подбородок плюс поля, умноженные на масштаб
-    лица. Масштаб растёт, когда глаза уходят от подбородка.
+    В трёхточечном кадре масштаб — это глаза–подбородок на лицевую высоту,
+    а высота рамки — высота формата в этом масштабе. Верх стоит на верхнем
+    поле над макушкой. Масштаб растёт, когда глаза уходят от подбородка.
     """
     if not allow_rotate:
         angle = 0.0
@@ -414,14 +490,12 @@ def pose_from_ends(
         angle = math.degrees(math.atan2(-(chin[0] - crown[0]), chin[1] - crown[1]))
     dist = max(math.hypot(chin[0] - crown[0], chin[1] - crown[1]), 8.0)
     eye_t = min(0.9, max(0.1, eye_t))
-    face_mm = fmt.face_height_mm if fmt.face_height_mm > 0 else max(fmt.height_mm * fmt.eye_to_chin_ratio, 0.1)
-    face_mm = max(face_mm, 0.1)
+    face_mm = _face_mm(fmt)
     scale = dist * (1.0 - eye_t) / face_mm
-    if not fmt.two_points:
-        overhead = fmt.overhead2_mm if fmt.overhead2_mm > 0 else fmt.height_mm * fmt.crown_ratio
+    if not fmt.two_points and fmt.face_height_mm > 0:
+        crop_h = max(fmt.height_mm, 0.1) * scale
     else:
-        overhead = fmt.height_mm * fmt.crown_ratio
-    crop_h = dist + (overhead + fmt.crop_under_mm) * scale
+        crop_h = dist + (_overhead_mm(fmt) + fmt.crop_under_mm) * scale
     crop_w = crop_h * fmt.aspect
     rad = math.radians(angle)
     unit = (-math.sin(rad), math.cos(rad))
@@ -497,45 +571,224 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return tuple(int(text[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
 
 
-def replace_background(image: Image.Image, target: tuple[int, int, int], tolerance: float, brush: int = 0) -> Image.Image:
-    """Красит фон, который цветом близок к краям и связан с ними.
+def _head_ellipse(face: FaceBox, width: int, height: int) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Только кожа лица. Белый фон рядом с волосами сюда не входит и заливается."""
+    center_x = (face.x + face.w / 2.0) * width
+    center_y = (face.y + face.h / 2.0) * height
+    if face.eyes_x is not None:
+        center_x = float(face.eyes_x) * width
+    if face.eyes_y is not None:
+        center_y = float(face.eyes_y) * height + face.h * height * 0.12
+    rx = max(2, int(round(face.w * width * 0.42)))
+    ry = max(2, int(round(face.h * height * 0.46)))
+    return (int(round(center_x)), int(round(center_y))), (rx, ry)
 
-    Человек в центре остаётся. Белая рубашка на белом фоне может пострадать —
-    для этого есть допуск и выключатель.
+
+def _in_body(face: FaceBox, x: int, y: int, width: int, height: int) -> bool:
+    """Плечи и рубашка часто доходят до края кадра. Оттуда заливку не начинаем."""
+    center_x = (face.x + face.w / 2.0) * width
+    if face.eyes_x is not None:
+        center_x = float(face.eyes_x) * width
+    shoulders = face.y * height + face.h * height * 0.85
+    if y < shoulders:
+        return False
+    half = face.w * width * (1.15 + 0.9 * min(1.0, (y - shoulders) / max(height - shoulders, 1.0)))
+    return abs(x - center_x) <= half
+
+
+def _matting_size(width: int, height: int, ref: int = 512) -> tuple[int, int]:
+    """Стороны для MODNet: кратны 32, короткая сторона около 512, если кадр далеко от этого размера."""
+    if max(height, width) < ref or min(height, width) > ref:
+        if width >= height:
+            new_h = ref
+            new_w = int(width / height * ref)
+        else:
+            new_w = ref
+            new_h = int(height / width * ref)
+    else:
+        new_w, new_h = width, height
+    return max(32, new_w - new_w % 32), max(32, new_h - new_h % 32)
+
+
+def _load_person_net() -> cv2.dnn.Net | None:
+    global _person_net
+    if _person_net is not None:
+        return _person_net
+    if not _PERSON_MODEL.is_file():
+        return None
+    _person_net = cv2.dnn.readNet(str(_PERSON_MODEL))
+    return _person_net
+
+
+def person_matte(image: Image.Image) -> np.ndarray | None:
+    """Где человек: 1 — фигура, 0 — фон. None, если модель не ответила."""
+    net = _load_person_net()
+    if net is None:
+        return None
+    source = np.ascontiguousarray(np.asarray(image.convert("RGB")))
+    height, width = source.shape[:2]
+    if height < 2 or width < 2:
+        return None
+    net_w, net_h = _matting_size(width, height)
+    resized = cv2.resize(source, (net_w, net_h), interpolation=cv2.INTER_AREA).astype(np.float32)
+    blob = np.transpose((resized - 127.5) / 127.5, (2, 0, 1))[None, ...]
+    try:
+        net.setInput(blob)
+        output = net.forward()
+    except cv2.error:
+        return None
+    if output.size == 0:
+        return None
+    matte = cv2.resize(output[0, 0], (width, height), interpolation=cv2.INTER_LINEAR)
+    return np.clip(matte, 0.0, 1.0).astype(np.float32)
+
+
+def background_alpha(
+    image: Image.Image,
+    tolerance: float,
+    brush: int = 0,
+    face: FaceBox | None = None,
+    method: str = "edge",
+) -> np.ndarray | None:
+    """Маска фона: 1 — фон, 0 — человек. Считается до цветокоррекции.
+
+    edge — от краёв по похожему цвету. figure — по силуэту человека.
+    Если силуэт не нашёлся, остаётся режим от краёв.
     """
-    source = np.asarray(image.convert("RGB"))
+    if tolerance <= 0:
+        return None
+    if method == "figure":
+        found = _figure_background_alpha(image, tolerance, brush, face)
+        if found is not None:
+            return found
+    return _edge_background_alpha(image, tolerance, brush, face)
+
+
+def _figure_background_alpha(
+    image: Image.Image,
+    tolerance: float,
+    brush: int = 0,
+    face: FaceBox | None = None,
+) -> np.ndarray | None:
+    """Фон по силуэту. Ползунок двигает только стену, лицо не бледнеет."""
+    matte = person_matte(image)
+    if matte is None:
+        return None
+    covered = float((matte > 0.5).mean())
+    if not (0.02 < covered < 0.98):
+        return None
+    cut = 0.18 + float(tolerance) / 100.0 * 0.42
+    lock = 0.80
+    alpha = np.zeros(matte.shape, dtype=np.float32)
+    alpha[matte <= cut] = 1.0
+    band = (matte > cut) & (matte < lock)
+    alpha[band] = ((lock - matte[band]) / (lock - cut)) ** 2
+    skin = None
+    if face is not None:
+        height, width = alpha.shape
+        skin = np.zeros((height, width), np.uint8)
+        center, axes = _head_ellipse(face, width, height)
+        cv2.ellipse(skin, center, axes, 0, 0, 360, 1, thickness=-1)
+    alpha[matte >= lock] = 0.0
+    if skin is not None:
+        alpha[skin > 0] = 0.0
+    if brush > 0:
+        feather = max(1, min(24, int(brush)))
+        kernel = feather * 2 + 1
+        alpha = cv2.GaussianBlur(alpha, (kernel, kernel), 0)
+        alpha[matte >= lock] = 0.0
+        if skin is not None:
+            alpha[skin > 0] = 0.0
+    alpha[alpha >= 0.92] = 1.0
+    alpha[alpha <= 0.04] = 0.0
+    return np.ascontiguousarray(alpha)
+
+
+def _edge_background_alpha(
+    image: Image.Image,
+    tolerance: float,
+    brush: int = 0,
+    face: FaceBox | None = None,
+) -> np.ndarray | None:
+    """Запасной фон: от краёв по похожему цвету, не заходя на узкий овал кожи."""
+    source = np.ascontiguousarray(np.asarray(image.convert("RGB")))
     height, width = source.shape[:2]
     if height < 2 or width < 2 or tolerance <= 0:
-        return image
-    border = np.concatenate(
-        [source[0, :, :], source[-1, :, :], source[:, 0, :], source[:, -1, :]],
-        axis=0,
-    ).astype(np.float32)
-    median = np.median(border, axis=0)
-    distance = np.linalg.norm(source.astype(np.float32) - median, axis=2)
-    similar = (distance <= tolerance).astype(np.uint8)
-    count, labels = cv2.connectedComponents(similar, connectivity=8)
-    if count <= 1:
-        return image
-    edge_labels = np.unique(
-        np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])
-    )
-    edge_labels = edge_labels[edge_labels != 0]
-    if edge_labels.size == 0:
-        return image
-    mask = np.isin(labels, edge_labels).astype(np.uint8) * 255
-    # Закрываем дырки фона и захватываем цветную кромку на границе волос и плеч.
-    radius = max(1, round(brush * min(height, width) / 1000)) if brush > 0 else max(1, round(min(height, width) / 350))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius * 2 + 1, radius * 2 + 1))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    expanded = cv2.dilate(mask, kernel)
+        return None
+    lab = cv2.cvtColor(source, cv2.COLOR_RGB2LAB)
+    wall = np.zeros((height + 2, width + 2), np.uint8)
+    if face is not None:
+        center, axes = _head_ellipse(face, width, height)
+        cv2.ellipse(wall, (center[0] + 1, center[1] + 1), axes, 0, 0, 360, 1, thickness=-1)
+    # Чувствительность 0…100: насколько соседний пиксель может отличаться, чтобы остаться фоном.
+    diff = max(1, int(round(float(tolerance) * 0.45)))
+    flags = 8 | cv2.FLOODFILL_MASK_ONLY | (255 << 8)
+    step = max(4, min(height, width) // 48)
+    seeds: list[tuple[int, int]] = []
+    for x in range(0, width, step):
+        seeds.append((x, 0))
+        seeds.append((x, height - 1))
+    for y in range(step, height - 1, step):
+        seeds.append((0, y))
+        seeds.append((width - 1, y))
+    span = (diff, diff, diff)
+    for x, y in seeds:
+        if wall[y + 1, x + 1] != 0:
+            continue
+        if face is not None and _in_body(face, x, y, width, height):
+            continue
+        cv2.floodFill(lab, wall, (x, y), (0, 0, 0), span, span, flags)
+    filled = np.where(wall[1:-1, 1:-1] == 255, np.uint8(255), np.uint8(0))
+    if int(filled.max()) == 0:
+        return None
+    speck = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    filled = cv2.morphologyEx(filled, cv2.MORPH_CLOSE, speck)
+    feather = max(1, min(24, int(brush))) if brush > 0 else max(1, round(min(height, width) / 350))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (feather * 2 + 1, feather * 2 + 1))
+    expanded = cv2.dilate(filled, kernel)
+    if face is not None:
+        center, axes = _head_ellipse(face, width, height)
+        cv2.ellipse(expanded, center, axes, 0, 0, 360, 0, thickness=-1)
     person = np.where(expanded == 0, np.uint8(255), np.uint8(0))
     distance = cv2.distanceTransform(person, cv2.DIST_L2, 3)
-    alpha = np.clip(1.0 - distance / max(radius, 1), 0.0, 1.0)
+    alpha = np.clip(1.0 - distance / max(feather, 1), 0.0, 1.0)
     alpha[expanded > 0] = 1.0
-    alpha = alpha[..., None]
-    painted = source.astype(np.float32) * (1.0 - alpha) + np.array(target, dtype=np.float32) * alpha
-    return Image.fromarray(painted.astype(np.uint8), "RGB")
+    return alpha.astype(np.float32)
+
+
+def hold_background_array(toned: np.ndarray, original: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """Коррекция остаётся на человеке. Пиксели фона берутся из кадра до коррекции."""
+    cover = alpha.astype(np.float32)
+    if cover.ndim == 2:
+        cover = cover[..., None]
+    kept = toned.astype(np.float32) * (1.0 - cover) + original.astype(np.float32) * cover
+    return np.clip(kept, 0.0, 255.0).astype(np.uint8)
+
+
+def paint_background_array(image: np.ndarray, alpha: np.ndarray, target: tuple[int, int, int]) -> np.ndarray:
+    """Кладёт ровный цвет заливки поверх уже скорректированного кадра."""
+    cover = alpha.astype(np.float32)
+    if cover.ndim == 2:
+        cover = cover[..., None]
+    base = image.astype(np.float32)
+    painted = base * (1.0 - cover) + np.array(target, dtype=np.float32) * cover
+    return np.clip(painted, 0.0, 255.0).astype(np.uint8)
+
+
+def replace_background(
+    image: Image.Image,
+    target: tuple[int, int, int],
+    tolerance: float,
+    brush: int = 0,
+    face: FaceBox | None = None,
+    method: str = "edge",
+) -> Image.Image:
+    """Красит найденный фон. По умолчанию фон ищется от краёв."""
+    alpha = background_alpha(image, tolerance, brush, face, method)
+    if alpha is None:
+        return image
+    painted = paint_background_array(np.asarray(image.convert("RGB")), alpha, target)
+    return Image.fromarray(painted, "RGB")
 
 
 def _tone_curve_lut(brightness: float, contrast: float, gamma: float, black_point: float, white_point: float) -> np.ndarray:
@@ -802,13 +1055,36 @@ def render_photo(
     angle: float = 0.0,
     brush: int = 0,
     resample: Image.Resampling = Image.Resampling.BICUBIC,
+    face: FaceBox | None = None,
+    prepared_alpha: np.ndarray | None = None,
+    already_cropped: bool = False,
+    method: str = "edge",
+    paint: bool = False,
 ) -> Image.Image:
+    """Собирает готовый кадр: обрезка, коррекция, фон, одежда, уголок.
+
+    already_cropped — картинка уже является кадром (превью). Тогда маска берётся
+    готовой, без повторного поиска фона. Фон не красится, пока paint выключен:
+    коррекция не применяется к нему, цвет стены остаётся со снимка.
+    """
     fill = hex_to_rgb(background or fmt.background)
-    prepared = replace_background(image, fill, tolerance, brush) if replace else image
-    size = photo_pixels(fmt, dpi)
-    cropped = render_crop(prepared, crop, size, fill, angle, resample)
+    if already_cropped:
+        picture = image.convert("RGB")
+        size = picture.size
+        alpha = prepared_alpha
+    else:
+        size = photo_pixels(fmt, dpi)
+        picture = render_crop(image, crop, size, fill, angle, resample)
+        # Маска по исходному снимку, заливка — после коррекции, чтобы выбранный
+        # цвет не ехал за яркостью, контрастом и гаммой.
+        alpha = None
+        if replace and tolerance > 0:
+            full = background_alpha(image, tolerance, brush, face, method)
+            if full is not None:
+                mask = Image.fromarray(np.clip(full * 255.0, 0, 255).astype(np.uint8), "L")
+                alpha = np.asarray(render_crop(mask, crop, size, 255, angle, resample)).astype(np.float32) / 255.0
     toned = apply_tone(
-        cropped,
+        picture,
         brightness,
         contrast,
         grayscale,
@@ -819,6 +1095,12 @@ def render_photo(
         white_point,
         balance,
     )
+    if alpha is not None:
+        corrected = np.asarray(toned.convert("RGB"))
+        if paint:
+            toned = Image.fromarray(paint_background_array(corrected, alpha, fill), "RGB")
+        else:
+            toned = Image.fromarray(hold_background_array(corrected, np.asarray(picture.convert("RGB")), alpha), "RGB")
     if clothes is not None and not grayscale:
         toned = paste_clothes(toned, clothes)
     placement, kind, rx_mm, ry_mm = resolve_corner(fmt, corner)

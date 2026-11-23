@@ -354,6 +354,18 @@ def move_selected(doc: SheetDoc, selected: set[str], dx: float, dy: float) -> Sh
     )
 
 
+def startup_folder(settings: Settings) -> Path:
+    """Папка проводника при запуске: та, что была открыта при выходе, иначе корень архива."""
+    for raw in (settings.last_folder, settings.archive_root):
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        folder = Path(text)
+        if folder.is_dir():
+            return folder
+    return Path.home()
+
+
 def month_folder(root: Path) -> Path:
     """Корень текущего месяца в архиве (archive_root в настройках)."""
     folder = Path(root)
@@ -563,6 +575,7 @@ def load_ready_info(photo: Path) -> dict:
 @dataclass
 class Settings:
     archive_root: str = str(Path.home() / "Фото на документы")
+    last_folder: str = ""
     prices: dict[str, float] = field(default_factory=dict)
     watch_folder: str = ""
     icc: str = ""
@@ -602,6 +615,8 @@ class Settings:
     tone_balance: list[float] = field(default_factory=lambda: [0.0] * 9)
     ground_threshold: float = 0.0
     replace_background: bool = False
+    background_method: str = "edge"
+    paint_background: bool = False
     brush_px: int = 0
     cut_style: str = "corners"
     cut_length_mm: float = 3.0
@@ -654,6 +669,7 @@ def load_settings() -> Settings:
     settings = Settings()
     for key in (
         "archive_root",
+        "last_folder",
         "watch_folder",
         "icc",
         "email",
@@ -687,6 +703,7 @@ def load_settings() -> Settings:
         ("currency", str),
         ("cut_style", str),
         ("sort_key", str),
+        ("background_method", str),
     ):
         if data.get(key):
             setattr(settings, key, cast(data[key]))
@@ -740,6 +757,7 @@ def load_settings() -> Settings:
         "save_limit_bytes",
         "save_open_folder",
         "replace_background",
+        "paint_background",
         "logo_auto",
         "email_ssl",
         "send_log",
@@ -773,6 +791,7 @@ def save_settings(settings: Settings) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "archive_root": settings.archive_root,
+        "last_folder": settings.last_folder,
         "prices": settings.prices,
         "watch_folder": settings.watch_folder,
         "icc": settings.icc,
@@ -812,6 +831,8 @@ def save_settings(settings: Settings) -> None:
         "tone_balance": settings.tone_balance,
         "ground_threshold": settings.ground_threshold,
         "replace_background": settings.replace_background,
+        "background_method": settings.background_method if settings.background_method in ("edge", "figure") else "edge",
+        "paint_background": settings.paint_background,
         "brush_px": settings.brush_px,
         "cut_style": settings.cut_style,
         "cut_length_mm": settings.cut_length_mm,
