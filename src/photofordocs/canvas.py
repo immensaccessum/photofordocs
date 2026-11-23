@@ -182,15 +182,16 @@ class PrintCanvas(QWidget):
         style = self.doc.cut_style if item.kind == "photo" and self.doc.cut_marks else "none"
         if style == "none":
             return
+        width = max(1, int(round(self.doc.cut_width_mm * self.zoom)))
         if style == "dash":
-            painter.setPen(QPen(QColor("#111"), 1, Qt.PenStyle.DashLine))
-            painter.drawRect(rect.adjusted(-3, -3, 3, 3))
+            painter.setPen(QPen(QColor("#111"), width, Qt.PenStyle.DashLine))
+            painter.drawRect(rect)
             return
         if style == "box":
-            painter.setPen(QPen(QColor("#111"), 1))
-            painter.drawRect(rect.adjusted(-2, -2, 2, 2))
+            painter.setPen(QPen(QColor("#111"), width))
+            painter.drawRect(rect)
             return
-        painter.setPen(QPen(QColor("#111"), 1))
+        painter.setPen(QPen(QColor("#111"), width))
         self._marks(painter, rect)
 
     def _marks(self, painter: QPainter, rect: QRectF) -> None:
@@ -201,8 +202,8 @@ class PrintCanvas(QWidget):
             (rect.left(), rect.bottom(), -1, 1),
             (rect.right(), rect.bottom(), 1, 1),
         ):
-            painter.drawLine(int(x + sx * 2), int(y), int(x + sx * (2 + length)), int(y))
-            painter.drawLine(int(x), int(y + sy * 2), int(x), int(y + sy * (2 + length)))
+            painter.drawLine(int(x), int(y), int(x + sx * length), int(y))
+            painter.drawLine(int(x), int(y), int(x), int(y + sy * length))
 
     def _rulers(self, painter: QPainter, paper: QRectF) -> None:
         """Линейка в сантиметрах, приклеена к верхнему и левому краю листа."""
@@ -406,6 +407,7 @@ class PrintCanvas(QWidget):
                 self.doc.margin_left_mm,
                 self.doc.cut_style,
                 self.doc.cut_length_mm,
+                self.doc.cut_width_mm,
             )
             self.changed.emit()
         self._announce()

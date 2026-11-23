@@ -2,7 +2,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -17,9 +19,11 @@ from photofordocs.imageops import (
     head_pose_pixels,
     Rect,
     frame_points,
+    matte_to_alpha,
     place_crop,
     contain_guides,
     move_middle,
+    pose_for_ends,
     pose_from_ends,
     render_photo,
     replace_background,
@@ -413,6 +417,67 @@ class BackgroundTest(unittest.TestCase):
             paint=True,
         )
         self.assertEqual(painted.getpixel((1, 1)), (0, 0, 255))
+
+    def test_matte_threshold_grows_with_tolerance(self) -> None:
+        matte = np.linspace(0.0, 1.0, 400, dtype=np.float32).reshape(20, 20)
+        low = matte_to_alpha(matte, 10)
+        high = matte_to_alpha(matte, 90)
+        self.assertIsNotNone(low)
+        self.assertIsNotNone(high)
+        self.assertGreater(float(high.mean()), float(low.mean()))
+
+    def test_given_mask_is_painted_without_searching(self) -> None:
+        fmt = next(item for item in load_formats() if item.id == "photo-3x4-color")
+        image = Image.new("RGB", (80, 100), (10, 20, 30))
+        alpha = np.zeros((100, 80), np.float32)
+        alpha[:, :40] = 1.0
+        with patch("photofordocs.imageops.background_alpha", side_effect=AssertionError("поиск фона")):
+            painted = render_photo(
+                image,
+                Rect(0, 0, 80, 100),
+                fmt,
+                72,
+                replace=True,
+                tolerance=40,
+                brightness=0,
+                contrast=0,
+                grayscale=False,
+                background="#00FF00",
+                paint=True,
+                source_alpha=alpha,
+                corner="none",
+            )
+        self.assertEqual(painted.getpixel((2, 2)), (0, 255, 0))
+        self.assertEqual(painted.getpixel((painted.width - 3, 2)), (10, 20, 30))
+
+    def test_two_formats_keep_the_same_paws(self) -> None:
+        formats = load_formats()
+        small = next(item for item in formats if item.id == "photo-3x4-color")
+        passport = next(item for item in formats if item.id == "passport-rf-2013")
+        size = (800, 1000)
+        face = FaceBox(0.35, 0.2, 0.3, 0.4, eyes_x=0.5, eyes_y=0.42, mouth_y=0.55)
+        crown = (400.0, 280.0)
+        chin = (400.0, 640.0)
+        first = pose_for_ends(size, face, small, crown, chin, False, 0.55)
+        second = pose_for_ends(size, face, passport, crown, chin, False, 0.55)
+        self.assertNotEqual(tuple(round(value, 3) for value in first), tuple(round(value, 3) for value in second))
+
+        def paws(fmt, pose):
+            zoom, shift_x, shift_y, angle, eye_t = pose
+            crop = place_crop(size, face, fmt, zoom, shift_x, shift_y, eye_t=eye_t)
+            points = frame_points(crop, fmt, angle, eye_t)
+            return points["crown"], points["chin"]
+
+        left_crown, left_chin = paws(small, first)
+        right_crown, right_chin = paws(passport, second)
+        for actual, expected in (
+            (left_crown, right_crown),
+            (left_chin, right_chin),
+            (left_crown, crown),
+            (left_chin, chin),
+        ):
+            self.assertAlmostEqual(actual[0], expected[0], delta=1.5)
+            self.assertAlmostEqual(actual[1], expected[1], delta=1.5)
 
 
 class SheetTest(unittest.TestCase):

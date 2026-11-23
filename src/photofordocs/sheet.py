@@ -82,12 +82,11 @@ def render_sheet(photo: Image.Image, fmt: Format, plan: SheetPlan, dpi: int = 30
     photo_h = px(fmt.height_mm)
     fitted = photo.resize((photo_w, photo_h), Image.Resampling.LANCZOS)
     mark = max(6, px(2.2))
-    gap = max(2, px(0.7))
     for cell in plan.cells:
         x = px(cell.x_mm)
         y = px(cell.y_mm)
         canvas.paste(fitted, (x, y))
-        _cut_marks(draw, x, y, photo_w, photo_h, mark, gap)
+        _cut_marks(draw, x, y, photo_w, photo_h, mark)
     return canvas
 
 
@@ -106,13 +105,13 @@ def render_document(
     canvas = Image.new("RGB", (max(1, px(width_mm)), max(1, px(height_mm))), (255, 255, 255))
     draw = ImageDraw.Draw(canvas)
     mark = max(4, px(doc.cut_length_mm or 2.2))
-    gap = max(2, px(0.7))
+    stroke = max(1, int(round((doc.cut_width_mm or 0.1) / 25.4 * dpi)))
     for item in doc.items:
-        _paint_item(canvas, draw, item, photos, footer, logo, px, mark, gap, doc)
+        _paint_item(canvas, draw, item, photos, footer, logo, px, mark, stroke, doc)
     return canvas
 
 
-def _paint_item(canvas, draw, item: SheetItem, photos, footer, logo, px, mark, gap, doc: SheetDoc) -> None:
+def _paint_item(canvas, draw, item: SheetItem, photos, footer, logo, px, mark, stroke, doc: SheetDoc) -> None:
     x, y = px(item.x_mm), px(item.y_mm)
     w, h = max(1, px(item.w_mm)), max(1, px(item.h_mm))
     if item.kind == "photo" and item.ready_id in photos:
@@ -124,11 +123,11 @@ def _paint_item(canvas, draw, item: SheetItem, photos, footer, logo, px, mark, g
         canvas.paste(image, (x, y))
         style = doc.cut_style if doc.cut_marks else "none"
         if style == "dash":
-            _dashed_rect(draw, x - gap, y - gap, w + gap * 2, h + gap * 2)
+            _dashed_rect(draw, x, y, w, h, stroke)
         elif style == "box":
-            draw.rectangle((x - gap, y - gap, x + w + gap, y + h + gap), outline=(0, 0, 0))
+            draw.rectangle((x, y, x + w, y + h), outline=(0, 0, 0), width=stroke)
         elif style == "corners":
-            _cut_marks(draw, x, y, w, h, mark, gap)
+            _cut_marks(draw, x, y, w, h, mark, stroke)
     elif item.kind == "footer" and (footer or item.text):
         draw.text((x + 4, y + 4), footer or item.text, fill=(20, 20, 20))
     elif item.kind == "logo" and logo is not None:
@@ -136,28 +135,28 @@ def _paint_item(canvas, draw, item: SheetItem, photos, footer, logo, px, mark, g
         canvas.paste(fitted, (x, y), fitted)
 
 
-def _dashed_rect(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int) -> None:
-    _dash(draw, x, y, x + w, y)
-    _dash(draw, x, y + h, x + w, y + h)
-    _dash(draw, x, y, x, y + h)
-    _dash(draw, x + w, y, x + w, y + h)
+def _dashed_rect(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, width: int = 1) -> None:
+    _dash(draw, x, y, x + w, y, width)
+    _dash(draw, x, y + h, x + w, y + h, width)
+    _dash(draw, x, y, x, y + h, width)
+    _dash(draw, x + w, y, x + w, y + h, width)
 
 
-def _dash(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int) -> None:
+def _dash(draw: ImageDraw.ImageDraw, x0: int, y0: int, x1: int, y1: int, width: int = 1) -> None:
     dash, hole = 8, 5
     if x0 == x1:
         y, end = min(y0, y1), max(y0, y1)
         while y < end:
-            draw.line((x0, y, x0, min(end, y + dash)), fill=(0, 0, 0))
+            draw.line((x0, y, x0, min(end, y + dash)), fill=(0, 0, 0), width=width)
             y += dash + hole
         return
     x, end = min(x0, x1), max(x0, x1)
     while x < end:
-        draw.line((x, y0, min(end, x + dash), y0), fill=(0, 0, 0))
+        draw.line((x, y0, min(end, x + dash), y0), fill=(0, 0, 0), width=width)
         x += dash + hole
 
 
-def _cut_marks(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, mark: int, gap: int) -> None:
+def _cut_marks(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, mark: int, width: int = 1) -> None:
     corners = (
         (x, y, -1, -1),
         (x + w, y, 1, -1),
@@ -165,7 +164,5 @@ def _cut_marks(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, mark: 
         (x + w, y + h, 1, 1),
     )
     for cx, cy, sx, sy in corners:
-        ox = cx + sx * gap
-        oy = cy + sy * gap
-        draw.line((ox, oy, ox + sx * mark, oy), fill=(0, 0, 0), width=1)
-        draw.line((ox, oy, ox, oy + sy * mark), fill=(0, 0, 0), width=1)
+        draw.line((cx, cy, cx + sx * mark, cy), fill=(0, 0, 0), width=width)
+        draw.line((cx, cy, cx, cy + sy * mark), fill=(0, 0, 0), width=width)

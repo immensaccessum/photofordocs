@@ -9,7 +9,6 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from photofordocs.clothes import install_clothes
 from photofordocs import formats as formats_mod
 from photofordocs.formats import parse_photolab_formats, save_format_order
 from photofordocs import session
@@ -25,7 +24,6 @@ _SKIP_NAMES = ("license", "licence", "лиценз")
 class ImportReport:
     formats: int = 0
     prices: int = 0
-    clothes: int = 0
     notes: list[str] = field(default_factory=list)
 
     def text(self) -> str:
@@ -34,8 +32,6 @@ class ImportReport:
             lines.append(f"Форматов: {self.formats}.")
         if self.prices:
             lines.append(f"Цен: {self.prices}. Цена в файле хранится в тысячных долях рубля.")
-        if self.clothes:
-            lines.append(f"Комплектов одежды: {self.clothes}.")
         lines.extend(self.notes)
         return "\n".join(lines)
 
@@ -185,7 +181,6 @@ def apply_settings(settings: Settings, sections: dict[str, dict[str, str]], slot
     settings.sheets_folder = common.get("Path to PapersBase", settings.sheets_folder)
     settings.temp_folder = common.get("Temp Path", settings.temp_folder)
     settings.editor = common.get("Path to PhotoEditor", settings.editor)
-    settings.clothes_dir = common.get("clothesPath", settings.clothes_dir)
     settings.search_folder = common.get("CustomPapersBase", settings.search_folder)
     settings.watch_folder = work.get("AutoAddPath", settings.watch_folder)
 
@@ -346,7 +341,6 @@ def _import_native(path: Path, *, settings: bool, formats: bool) -> ImportReport
                     printers.mkdir(parents=True, exist_ok=True)
                     (printers / Path(name).name).write_bytes(archive.read(name))
             report.notes.append("Настройки программы записаны.")
-            report.notes.extend(_clothes_note(current))
         if formats:
             prefix = f"{_BUNDLE_ROOT}/formats/"
             names = [name for name in archive.namelist() if name.startswith(prefix) and name.endswith(".yaml")]
@@ -408,7 +402,6 @@ def import_phs(path: Path, *, settings: bool = True, formats: bool = True) -> Im
         report.prices = priced
     if settings:
         report.notes.extend(apply_settings(current, sections, slots))
-        report.notes.extend(_clothes_note(current))
     if settings or formats:
         save_settings(current)
     return report
@@ -419,12 +412,3 @@ def _format_block(record: dict[str, str]) -> str:
     lines.extend(f"{key}={value}" for key, value in record.items())
     return "\n".join(lines)
 
-
-def _clothes_note(settings: Settings) -> list[str]:
-    folder = Path(settings.clothes_dir) if settings.clothes_dir else None
-    if folder is None or not folder.is_dir():
-        return []
-    count = install_clothes(folder)
-    if count:
-        return [f"Из папки одежды разобрано комплектов: {count}."]
-    return ["Папка одежды указана, но готовых картинок в ней не нашлось."]

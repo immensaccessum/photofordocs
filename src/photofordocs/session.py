@@ -25,6 +25,11 @@ class ReadyItem:
     corner: str = "none"
     grayscale: bool = False
     corner_mm: float = 0.0
+    zoom: float = 1.0
+    shift_x: float = 0.0
+    shift_y: float = 0.0
+    angle: float = 0.0
+    eye_t: float = 0.55
 
 
 @dataclass
@@ -74,6 +79,7 @@ class SheetDoc:
     margin_left_mm: float = 4.0
     cut_style: str = "corners"
     cut_length_mm: float = 3.0
+    cut_width_mm: float = 0.1
 
 
 @dataclass
@@ -351,6 +357,7 @@ def move_selected(doc: SheetDoc, selected: set[str], dx: float, dy: float) -> Sh
         doc.margin_left_mm,
         doc.cut_style,
         doc.cut_length_mm,
+        doc.cut_width_mm,
     )
 
 
@@ -595,7 +602,6 @@ class Settings:
     default_format: str = ""
     search_folder: str = ""
     photo_base: str = ""
-    clothes_dir: str = ""
     printer_name: str = ""
     printers: list[str] = field(default_factory=list)
     printer_dpi: int = 300
@@ -620,6 +626,7 @@ class Settings:
     brush_px: int = 0
     cut_style: str = "corners"
     cut_length_mm: float = 3.0
+    cut_width_mm: float = 0.1
     ask_before_delete: bool = True
     ask_place: bool = True
     place_horizontal: bool = True
@@ -695,7 +702,6 @@ def load_settings() -> Settings:
     settings.prices = {str(key): float(value) for key, value in (data.get("prices") or {}).items()}
     for key, cast in (
         ("photo_base", str),
-        ("clothes_dir", str),
         ("printer_name", str),
         ("logo_path", str),
         ("logo_place", str),
@@ -732,6 +738,7 @@ def load_settings() -> Settings:
         "tone_sharpness",
         "ground_threshold",
         "cut_length_mm",
+        "cut_width_mm",
         "external_save_price",
         "retouch_koeff",
     ):
@@ -811,7 +818,6 @@ def save_settings(settings: Settings) -> None:
         "default_format": settings.default_format,
         "search_folder": settings.search_folder,
         "photo_base": settings.photo_base,
-        "clothes_dir": settings.clothes_dir,
         "printer_name": settings.printer_name,
         "printers": settings.printers,
         "printer_dpi": settings.printer_dpi,
@@ -836,6 +842,7 @@ def save_settings(settings: Settings) -> None:
         "brush_px": settings.brush_px,
         "cut_style": settings.cut_style,
         "cut_length_mm": settings.cut_length_mm,
+        "cut_width_mm": settings.cut_width_mm,
         "ask_before_delete": settings.ask_before_delete,
         "ask_place": settings.ask_place,
         "place_horizontal": settings.place_horizontal,
@@ -990,6 +997,7 @@ def load_scheme(path: Path, doc: SheetDoc) -> SheetDoc:
         float(data.get("margin_left_mm", data.get("margin_mm", doc.margin_left_mm))),
         str(data.get("cut_style", doc.cut_style)),
         float(data.get("cut_length_mm", doc.cut_length_mm)),
+        float(data.get("cut_width_mm", doc.cut_width_mm)),
     )
 
 

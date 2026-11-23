@@ -471,6 +471,29 @@ def head_share(
     return percent, percent / 100.0 * fmt.height_mm
 
 
+def pose_for_ends(
+    image_size: tuple[int, int],
+    face: FaceBox | None,
+    fmt: Format,
+    crown: tuple[float, float],
+    chin: tuple[float, float],
+    allow_rotate: bool,
+    eye_line: float,
+) -> tuple[float, float, float, float, float]:
+    """Посадка рамки вокруг лапок: zoom, сдвиг, угол и линия глаз.
+
+    Снимок и каталог форматов не меняются.
+    """
+    eye_t = ends_eye_t(fmt, eye_line)
+    left, top, crop_h, angle = pose_from_ends(fmt, crown, chin, allow_rotate, eye_t)
+    zoom, shift_x, shift_y = zoom_shift_for_box(image_size, face, fmt, left, top, crop_h, eye_t)
+    shown = angle if allow_rotate else 0.0
+    shift_x, shift_y = contain_guides(
+        image_size, face, fmt, zoom, shift_x, shift_y, shown, eye_t
+    )
+    return zoom, shift_x, shift_y, shown, eye_t
+
+
 def pose_from_ends(
     fmt: Format,
     crown: tuple[float, float],
@@ -664,16 +687,16 @@ def background_alpha(
     return _edge_background_alpha(image, tolerance, brush, face)
 
 
-def _figure_background_alpha(
-    image: Image.Image,
+def matte_to_alpha(
+    matte: np.ndarray,
     tolerance: float,
     brush: int = 0,
     face: FaceBox | None = None,
 ) -> np.ndarray | None:
-    """Фон по силуэту. Ползунок двигает только стену, лицо не бледнеет."""
-    matte = person_matte(image)
-    if matte is None:
-        return None
+    """Порог силуэта: 1 — фон, 0 — человек. Сеть здесь не вызывается.
+
+    Ползунок двигает только стену, лицо не бледнеет.
+    """
     covered = float((matte > 0.5).mean())
     if not (0.02 < covered < 0.98):
         return None
@@ -702,6 +725,19 @@ def _figure_background_alpha(
     alpha[alpha >= 0.92] = 1.0
     alpha[alpha <= 0.04] = 0.0
     return np.ascontiguousarray(alpha)
+
+
+def _figure_background_alpha(
+    image: Image.Image,
+    tolerance: float,
+    brush: int = 0,
+    face: FaceBox | None = None,
+) -> np.ndarray | None:
+    """Фон по силуэту. Матч считает сеть, порог от неё не зависит."""
+    matte = person_matte(image)
+    if matte is None:
+        return None
+    return matte_to_alpha(matte, tolerance, brush, face)
 
 
 def _edge_background_alpha(
@@ -976,19 +1012,6 @@ def _corner_inward(spot: str) -> tuple[int, int]:
     return {"tl": (1, 1), "tr": (-1, 1), "bl": (1, -1), "br": (-1, -1)}[spot]
 
 
-def paste_clothes(image: Image.Image, clothes: Image.Image) -> Image.Image:
-    """Кладёт PNG одежды на нижнюю часть кадра. Прозрачность одежды сохраняется."""
-    base = image.convert("RGBA")
-    shirt = clothes.convert("RGBA")
-    target_w = int(base.width * 0.92)
-    scale = target_w / shirt.width
-    shirt = shirt.resize((target_w, max(1, int(shirt.height * scale))), Image.Resampling.LANCZOS)
-    x = (base.width - shirt.width) // 2
-    y = base.height - shirt.height - int(base.height * 0.02)
-    base.alpha_composite(shirt, (x, max(0, y)))
-    return base.convert("RGB")
-
-
 def render_crop(
     image: Image.Image,
     crop: Rect,
@@ -1025,6 +1048,21 @@ def render_crop(
     return image.transform(out_size, Image.Transform.AFFINE, matrix, resample=resample, fillcolor=fill)
 
 
+def _crop_alpha(
+    full: np.ndarray | None,
+    crop: Rect,
+    size: tuple[int, int],
+    angle: float,
+    resample: Image.Resampling,
+) -> np.ndarray | None:
+    """Обрезает маску фона тем же окном, что и кадр. Снаружи кадра — полная заливка."""
+    if full is None:
+        return None
+    mask = Image.fromarray(np.clip(full * 255.0, 0, 255).astype(np.uint8), "L")
+    cropped = render_crop(mask, crop, size, 255, angle, resample)
+    return np.asarray(cropped).astype(np.float32) / 255.0
+
+
 def photo_pixels(fmt: Format, dpi: int) -> tuple[int, int]:
     return (
         max(1, round(fmt.width_mm / 25.4 * dpi)),
@@ -1051,7 +1089,6 @@ def render_photo(
     white_point: float = 255.0,
     balance: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]] | None = None,
     corner: str = "none",
-    clothes: Image.Image | None = None,
     angle: float = 0.0,
     brush: int = 0,
     resample: Image.Resampling = Image.Resampling.BICUBIC,
@@ -1060,12 +1097,14 @@ def render_photo(
     already_cropped: bool = False,
     method: str = "edge",
     paint: bool = False,
+    source_alpha: np.ndarray | None = None,
 ) -> Image.Image:
-    """Собирает готовый кадр: обрезка, коррекция, фон, одежда, уголок.
+    """Собирает готовый кадр: обрезка, коррекция, фон и уголок.
 
     already_cropped — картинка уже является кадром (превью). Тогда маска берётся
-    готовой, без повторного поиска фона. Фон не красится, пока paint выключен:
-    коррекция не применяется к нему, цвет стены остаётся со снимка.
+    готовой, без повторного поиска фона. source_alpha — такая же маска на весь
+    исходник: её обрезают вместе с кадром и фон заново не ищут. Фон не красится,
+    пока paint выключен: коррекция не применяется к нему, цвет стены остаётся со снимка.
     """
     fill = hex_to_rgb(background or fmt.background)
     if already_cropped:
@@ -1077,12 +1116,10 @@ def render_photo(
         picture = render_crop(image, crop, size, fill, angle, resample)
         # Маска по исходному снимку, заливка — после коррекции, чтобы выбранный
         # цвет не ехал за яркостью, контрастом и гаммой.
-        alpha = None
-        if replace and tolerance > 0:
+        alpha = _crop_alpha(source_alpha, crop, size, angle, resample)
+        if alpha is None and replace and tolerance > 0:
             full = background_alpha(image, tolerance, brush, face, method)
-            if full is not None:
-                mask = Image.fromarray(np.clip(full * 255.0, 0, 255).astype(np.uint8), "L")
-                alpha = np.asarray(render_crop(mask, crop, size, 255, angle, resample)).astype(np.float32) / 255.0
+            alpha = _crop_alpha(full, crop, size, angle, resample)
     toned = apply_tone(
         picture,
         brightness,
@@ -1101,8 +1138,6 @@ def render_photo(
             toned = Image.fromarray(paint_background_array(corrected, alpha, fill), "RGB")
         else:
             toned = Image.fromarray(hold_background_array(corrected, np.asarray(picture.convert("RGB")), alpha), "RGB")
-    if clothes is not None and not grayscale:
-        toned = paste_clothes(toned, clothes)
     placement, kind, rx_mm, ry_mm = resolve_corner(fmt, corner)
     rx_px = max(1, round(rx_mm / fmt.width_mm * size[0])) if fmt.width_mm else 1
     ry_px = max(1, round(ry_mm / fmt.height_mm * size[1])) if fmt.height_mm else 1
@@ -1137,3 +1172,22 @@ def write_jpeg(image: Image.Image, path: Path, dpi: int, quality: int, max_kb: i
         data = best
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+
+
+def write_pdf(images: list[Image.Image], path: Path, dpi: int, quality: int) -> None:
+    """PDF со страницей в миллиметрах картинки: 100 % в читалке совпадает с бумагой."""
+    if not images:
+        raise ValueError("empty pdf")
+    dpi = max(1, int(dpi))
+    quality = max(10, min(100, int(quality)))
+    pages = [image.convert("RGB") for image in images]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pages[0].save(
+        path,
+        "PDF",
+        save_all=True,
+        append_images=pages[1:],
+        resolution=float(dpi),
+        quality=quality,
+    )

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from photofordocs import clothes, formats, phs, session
+from photofordocs import formats, phs, session
 
 
 SAMPLE = """[Workdata]
@@ -94,13 +94,11 @@ class PhsImportTest(unittest.TestCase):
                 session.SETTINGS_PATH,
                 formats.USER_DIR,
                 formats.ORDER_PATH,
-                clothes.CLOTHES_DIR,
             )
             session.CONFIG_DIR = root
             session.SETTINGS_PATH = root / "settings.yaml"
             formats.USER_DIR = root / "formats"
             formats.ORDER_PATH = root / "format-order.yaml"
-            clothes.CLOTHES_DIR = root / "clothes"
             try:
                 report = phs.import_phs(path)
                 loaded = session.load_settings()
@@ -113,7 +111,6 @@ class PhsImportTest(unittest.TestCase):
                     session.SETTINGS_PATH,
                     formats.USER_DIR,
                     formats.ORDER_PATH,
-                    clothes.CLOTHES_DIR,
                 ) = previous
 
     def test_sample_brings_workplace_formats_and_skips_license(self) -> None:

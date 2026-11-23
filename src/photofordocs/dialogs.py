@@ -197,19 +197,11 @@ class SettingsDialog(QDialog):
     def _paths_page(self) -> QWidget:
         page = QWidget()
         form = QFormLayout(page)
-        self.photo_base = self._path_row(self.settings.photo_base, True)
         self.archive = self._path_row(self.settings.archive_root, True)
         self.editor = self._path_row(self.settings.editor, False)
-        self.clothes = self._path_row(self.settings.clothes_dir, True)
-        self.temp = self._path_row(self.settings.temp_folder, True)
-        self.sheets = self._path_row(self.settings.sheets_folder, True)
         self.studio = QLineEdit(self.settings.studio)
-        form.addRow("Путь к базе для хранения фотографий", self.photo_base._row)  # type: ignore[attr-defined]
-        form.addRow("Последняя рабочая папка", self.archive._row)  # type: ignore[attr-defined]
+        form.addRow("Путь к базе для хранения фотографий", self.archive._row)  # type: ignore[attr-defined]
         form.addRow("Программа внешнего графического редактора", self.editor._row)  # type: ignore[attr-defined]
-        form.addRow("Каталог для хранения шаблонов одежды", self.clothes._row)  # type: ignore[attr-defined]
-        form.addRow("Каталог для хранения временных файлов", self.temp._row)  # type: ignore[attr-defined]
-        form.addRow("Каталог для хранения файлов сформированных листов", self.sheets._row)  # type: ignore[attr-defined]
         form.addRow("Название салона", self.studio)
         return page
 
@@ -229,7 +221,7 @@ class SettingsDialog(QDialog):
         self.currency = QLineEdit(self.settings.currency)
         self.currency.setMaximumWidth(120)
         form.addRow("Валюта", self.currency)
-        note = QLabel("Цвет панелей, камера и пакеты одежды ColorRiver здесь не повторяются.")
+        note = QLabel("Цвет панелей и камера ColorRiver здесь не повторяются.")
         note.setWordWrap(True)
         form.addRow(note)
         return page
@@ -262,12 +254,19 @@ class SettingsDialog(QDialog):
         self.cut_length.setDecimals(1)
         self.cut_length.setSuffix(" мм")
         self.cut_length.setValue(float(self.settings.cut_length_mm or 3))
+        self.cut_width = QDoubleSpinBox()
+        self.cut_width.setRange(0.05, 2.0)
+        self.cut_width.setSingleStep(0.05)
+        self.cut_width.setDecimals(2)
+        self.cut_width.setSuffix(" мм")
+        self.cut_width.setValue(float(self.settings.cut_width_mm or 0.1))
         form.addRow("Ширина белой рамки вокруг выходного кадра", self.white)
         form.addRow("Текст рекламы", self.advert)
         form.addRow("DPI готовой фотографии", self.photo_dpi)
         form.addRow("Качество JPEG фотографии", self.jpeg_photo)
         form.addRow("Линии отреза", self.cut)
         form.addRow("Длина уголка линии отреза", self.cut_length)
+        form.addRow("Толщина линии отреза", self.cut_width)
         return page
 
     def _paper_page(self) -> QWidget:
@@ -383,19 +382,15 @@ class SettingsDialog(QDialog):
         orient.addStretch(1)
         layout.addLayout(orient)
         layout.addLayout(row)
-        note = QLabel("Проверка обновлений и пакетов одежды ColorRiver не выполняется.")
+        note = QLabel("Проверка обновлений ColorRiver не выполняется.")
         note.setWordWrap(True)
         layout.addWidget(note)
         layout.addStretch(1)
         return page
 
     def apply(self) -> Settings:
-        self.settings.photo_base = self.photo_base.text().strip()
         self.settings.archive_root = self.archive.text().strip() or self.settings.archive_root
         self.settings.editor = self.editor.text().strip()
-        self.settings.clothes_dir = self.clothes.text().strip()
-        self.settings.temp_folder = self.temp.text().strip()
-        self.settings.sheets_folder = self.sheets.text().strip()
         self.settings.studio = self.studio.text().strip()
         self.settings.face_detect = self.face.isChecked()
         self.settings.currency = self.currency.text().strip() or "₽"
@@ -405,6 +400,7 @@ class SettingsDialog(QDialog):
         self.settings.jpeg_photo = int(self.jpeg_photo.value())
         self.settings.cut_style = str(self.cut.currentData())
         self.settings.cut_length_mm = float(self.cut_length.value())
+        self.settings.cut_width_mm = float(self.cut_width.value())
         self.settings.default_paper = str(self.paper.currentData())
         self.settings.default_landscape = self.landscape.isChecked()
         self.settings.margin_top_mm = float(self.margin_top.value())
@@ -500,7 +496,7 @@ class FormatCatalog(QDialog):
         three = QWidget()
         three_form = QFormLayout(three)
         three_form.addRow("Верхнее поле", self.over2)
-        three_form.addRow("Лицевая часть", self.face)
+        three_form.addRow("Глаза — подбородок", self.face)
         points.addTab(two, "по 2-м точкам")
         points.addTab(three, "По 3-м точкам")
         fields.addRow(points)
