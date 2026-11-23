@@ -494,6 +494,16 @@ def ready_photo_path(source: Path, format_id: str) -> Path:
     return ready_folder(source) / f"{source.stem}.{ident}.jpg"
 
 
+def ready_copy_path(path: Path) -> tuple[Path, int]:
+    """Свободное имя рядом с уже сохранённым кадром: «… 2.jpg», затем 3 и дальше."""
+    number = 2
+    while True:
+        candidate = path.with_name(f"{path.stem} {number}{path.suffix}")
+        if not candidate.exists():
+            return candidate, number
+        number += 1
+
+
 def ready_info_path(photo: Path) -> Path:
     return photo.with_name(photo.name + ".info")
 
@@ -661,6 +671,7 @@ class Settings:
     preview_height: int = 0
     left_sizes: list[int] = field(default_factory=list)
     currency: str = "₽"
+    theme: str = "auto"
     auto_date_folder: bool = False
     colors: list[dict] = field(default_factory=list)
     retouch_koeff: float = 0.0
@@ -713,6 +724,8 @@ def load_settings() -> Settings:
     ):
         if data.get(key):
             setattr(settings, key, cast(data[key]))
+    theme = str(data.get("theme") or "auto")
+    settings.theme = theme if theme in ("auto", "light", "dark") else "auto"
     for key, cast in (
         ("printer_dpi", int),
         ("export_dpi", int),
@@ -877,6 +890,7 @@ def save_settings(settings: Settings) -> None:
         "preview_height": settings.preview_height,
         "left_sizes": settings.left_sizes,
         "currency": settings.currency,
+        "theme": settings.theme if settings.theme in ("auto", "light", "dark") else "auto",
         "colors": settings.colors,
         "retouch_koeff": settings.retouch_koeff,
     }

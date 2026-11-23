@@ -222,25 +222,17 @@ class FilesMixin:
         self._edit_poll.start(400)
 
     def _file_tools(self):
-        specs = (
+        folders = (
             ("expand", "Развернуть ветки", self._expand_files),
             ("collapse", "Свернуть ветки", self._collapse_files),
             ("home", "Главная папка базы", self._open_archive_root),
             ("today", "Папка месяца", self._open_month),
             ("explorer", "Открыть папку в проводнике", self._reveal_folder),
-            ("name-down", "По имени, по убыванию", lambda: self._sort_files("name", True)),
-            ("date-down", "По дате, новые сверху", lambda: self._sort_files("date", True)),
-            ("pencil", "Внешний редактор", self._external_editor),
-            ("turn-left", "Повернуть против часовой", lambda: self._rotate_shot(-90)),
-            ("turn-right", "Повернуть по часовой", lambda: self._rotate_shot(90)),
-            ("delete", "Удалить", self._delete_selected_file),
-            ("refresh", "Обновить", self._fill_files),
-            ("name-up", "По имени, по возрастанию", lambda: self._sort_files("name", False)),
-            ("date-up", "По дате, старые сверху", lambda: self._sort_files("date", False)),
         )
         grid = QGridLayout()
         grid.setSpacing(2)
-        for index, (kind, tip, handler) in enumerate(specs):
+
+        def place(kind: str, tip: str, handler, row: int, column: int) -> QToolButton:
             button = QToolButton()
             button.setObjectName("filetool")
             button.setAutoRaise(False)
@@ -249,15 +241,25 @@ class FilesMixin:
             button.setFixedSize(26, 26)
             button.setToolTip(tip)
             button.clicked.connect(handler)
-            row = 0 if index < 7 else 1
-            column = index if index < 7 else index - 7
-            if column >= 5:
-                column += 1
             grid.addWidget(button, row, column)
+            return button
+
+        for index, spec in enumerate(folders):
+            place(*spec, 0, index)
+        key, reverse = getattr(self, "_file_order", ("name", False))
+        self._sort_held = {
+            "name": reverse if key == "name" else False,
+            "date": reverse if key == "date" else True,
+        }
+        self._sort_name_button = place("name-up", "", lambda: self._toggle_sort("name"), 0, 6)
+        self._sort_date_button = place("date-down", "", lambda: self._toggle_sort("date"), 0, 7)
+        for button in (self._sort_name_button, self._sort_date_button):
+            button.setCheckable(True)
+        self._sync_sort_buttons()
         line = QFrame()
         line.setFrameShape(QFrame.Shape.VLine)
         line.setFrameShadow(QFrame.Shadow.Sunken)
-        grid.addWidget(line, 0, 5, 2, 1)
+        grid.addWidget(line, 0, 5)
         return grid
 
     def _file_icon(self, kind: str) -> QIcon:
@@ -378,15 +380,6 @@ class FilesMixin:
             painter.setBrush(QColor("#9aa7b5"))
             painter.drawEllipse(5, 13, 3, 3)
             painter.drawEllipse(12, 13, 3, 3)
-        elif kind == "refresh":
-            painter.setPen(QPen(green, 2))
-            painter.setBrush(Qt.GlobalColor.transparent)
-            painter.drawArc(4, 3, 12, 12, 40 * 16, 140 * 16)
-            painter.drawArc(4, 5, 12, 12, 220 * 16, 140 * 16)
-            painter.drawLine(14, 5, 16, 3)
-            painter.drawLine(14, 5, 14, 8)
-            painter.drawLine(4, 14, 2, 16)
-            painter.drawLine(4, 14, 4, 11)
         painter.end()
         return QIcon(pix)
 
@@ -546,6 +539,9 @@ class FilesMixin:
     def _folder_changed(self, path: str) -> None:
         if self.folder_root is not None and Path(path) == self.folder_root:
             self._fill_files()
+            missing = [shot.path for shot in self.shots if shot.path.parent == self.folder_root and not shot.path.is_file()]
+            if missing:
+                self._forget_sources(set(missing))
 
     def _fill_files(self) -> None:
         current = self.files.currentItem()
@@ -597,15 +593,29 @@ class FilesMixin:
                     ready_cached = self._thumb_icon(saved["path"])
                     child.setIcon(0, ready_cached if ready_cached is not None else (printed_icon if saved.get("printed") else ready_icon))
                     node.addChild(child)
+                self.files.addTopLevelItem(node)
                 if node.childCount():
                     node.setExpanded(True)
-                self.files.addTopLevelItem(node)
                 if selected and (str(path) == selected or any(saved["path"] == selected for saved in saved_rows)):
                     chosen = node if str(path) == selected else next(node.child(i) for i in range(node.childCount()) if node.child(i).data(0, Qt.ItemDataRole.UserRole) == selected)
                     self.files.setCurrentItem(chosen)
         finally:
             self._reveal_expand = True
         self._schedule_thumbs()
+
+    def _reveal_saved(self, source: Path, saved: Path) -> None:
+        """После сохранения открыть ветку снимка и показать новую строку кадра."""
+        node = self._thumb_items.get(str(source))
+        child = self._thumb_items.get(str(saved))
+        self._reveal_expand = False
+        try:
+            if node is not None and node.childCount() and not node.isExpanded():
+                node.setExpanded(True)
+        finally:
+            self._reveal_expand = True
+        target = child or node
+        if target is not None:
+            self.files.scrollToItem(target, QAbstractItemView.ScrollHint.EnsureVisible)
 
     def _opened_branch(self, item: QTreeWidgetItem) -> None:
         self._schedule_thumbs()
@@ -740,9 +750,8 @@ class FilesMixin:
                     self.format_box.setCurrentIndex(index)
                 self._set_mode("ready")
             return
-        if self._mode == "print":
-            return
         self._load_source(Path(str(raw)))
+        self._set_mode("size")
 
     def _show_preview(self, path: Path) -> None:
         shot = next((item for item in self.shots if item.path == path), None)
@@ -793,8 +802,35 @@ class FilesMixin:
         else:
             subprocess.Popen(["xdg-open", str(self.folder_root)])
 
+    def _toggle_sort(self, key: str) -> None:
+        """Тот же столбец меняет направление, другой столбец включает свой последний порядок."""
+        current, _reverse = self._file_order
+        direction = not self._sort_held[key] if current == key else self._sort_held[key]
+        self._sort_files(key, direction)
+
+    def _sync_sort_buttons(self) -> None:
+        name_button = getattr(self, "_sort_name_button", None)
+        date_button = getattr(self, "_sort_date_button", None)
+        if name_button is None or date_button is None:
+            return
+        key, _reverse = self._file_order
+        tips = {
+            ("name", False): "По имени, по возрастанию",
+            ("name", True): "По имени, по убыванию",
+            ("date", False): "По дате, старые сверху",
+            ("date", True): "По дате, новые сверху",
+        }
+        for button, column in ((name_button, "name"), (date_button, "date")):
+            reverse = self._sort_held[column]
+            button.setIcon(self._file_icon(f"{column}-{'down' if reverse else 'up'}"))
+            button.setToolTip(tips[(column, reverse)])
+            button.setChecked(key == column)
+
     def _sort_files(self, key: str, reverse: bool) -> None:
         self._file_order = (key, reverse)
+        if hasattr(self, "_sort_held"):
+            self._sort_held[key] = reverse
+        self._sync_sort_buttons()
         self._fill_files()
 
     def _rotate_tree_source(self, item: QTreeWidgetItem, degrees: int) -> None:
@@ -921,9 +957,7 @@ class FilesMixin:
             QMessageBox.warning(self, "Удалить", str(error))
             return
         gone = {path for path in sources}
-        self.shots = [shot for shot in self.shots if shot.path not in gone]
-        if self.index >= len(self.shots):
-            self.index = len(self.shots) - 1
+        self._forget_sources(gone)
         self._fill_files()
 
     def _delete_branch(self, item: QTreeWidgetItem) -> None:
@@ -1008,6 +1042,42 @@ class FilesMixin:
         info.setdefault("name", photo.stem)
         write_ready_info(photo, info)
         self._fill_files()
+
+    def _forget_sources(self, gone: set[Path]) -> None:
+        """Снять удалённые оригиналы с холста, с готового кадра и с листов."""
+        if not gone:
+            return
+        names = {str(path) for path in gone}
+        removed = [shot for shot in self.shots if shot.path in gone]
+        for shot in removed:
+            self._bg_cache.pop(id(shot), None)
+            self._alpha_cache.pop(id(shot), None)
+            self._live_cache.pop(id(shot), None)
+            self._shot_stamps.pop(str(shot.path), None)
+        self.shots = [shot for shot in self.shots if shot.path not in gone]
+        removed_ready = {item.id for item in self.ready if item.source in names}
+        self.ready = [item for item in self.ready if item.id not in removed_ready]
+        documents = list(self.pages)
+        if self.doc not in documents:
+            documents.append(self.doc)
+        for page in documents:
+            page.items = [
+                item
+                for item in page.items
+                if item.kind != "photo" or (item.ready_id not in removed_ready and item.path not in names)
+            ]
+        for ident in removed_ready:
+            self._sheet_pixmaps.pop(ident, None)
+        if self.shots:
+            self._select_row(min(max(self.index, 0), len(self.shots) - 1))
+        else:
+            self.index = -1
+            self._thumb_source = QPixmap()
+            self._thumb_fitted = None
+            self.thumb.clear()
+            self.refresh()
+            self.statusBar().showMessage("Снимок удалён")
+        self._refresh_sheet()
 
     def _select_row(self, row: int) -> None:
         if row < 0 or row >= len(self.shots):

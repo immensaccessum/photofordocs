@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -208,25 +209,43 @@ class SheetMixin:
         layout = QVBoxLayout(page)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
-        buttons = QGridLayout()
+        printer_row = QHBoxLayout()
+        printer_row.setSpacing(4)
+        self.printer_box = QComboBox()
+        self.printer_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.printer_box.setMinimumContentsLength(12)
+        self.printer_box.currentIndexChanged.connect(self._printer_picked)
+        self.printer_gear = QToolButton()
+        self.printer_gear.setObjectName("filetool")
+        self.printer_gear.setAutoRaise(False)
+        self.printer_gear.setIcon(self._gear_icon())
+        self.printer_gear.setIconSize(QSize(18, 18))
+        self.printer_gear.setFixedSize(26, 26)
+        self.printer_gear.setToolTip("Настройки принтера")
+        self.printer_gear.clicked.connect(self._configure_printer)
+        printer_row.addWidget(self.printer_box, 1)
+        printer_row.addWidget(self.printer_gear)
+        layout.addLayout(printer_row)
+        buttons = QHBoxLayout()
         buttons.setSpacing(4)
-        actions = (
-            (0, 0, "print", "Печать", self.print_sheet),
-            (0, 1, "save", "Сохранить\nлист", self.save_sheet),
-            (1, 0, "clear", "Очистить\nлист", self._clear_sheet),
-            (1, 1, "logo", "Добавить\nлоготип", self._add_logo),
-        )
-        for row, column, kind, title, slot in actions:
-            button = QPushButton(title)
-            button.setObjectName("printaction")
-            button.setMinimumHeight(52)
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            if kind != "logo":
-                button.setIcon(self._print_icon(kind))
-                button.setIconSize(QSize(22, 22))
-            button.clicked.connect(lambda _checked=False, action=slot: action())
-            buttons.addWidget(button, row, column)
+        self.print_button = QPushButton("Печать")
+        self.print_button.setObjectName("printaction")
+        self.print_button.setMinimumHeight(40)
+        self.print_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.print_button.setIcon(self._print_icon("print"))
+        self.print_button.setIconSize(QSize(22, 22))
+        self.print_button.clicked.connect(self._output_sheet)
+        clear = QPushButton("Очистить лист")
+        clear.setObjectName("printaction")
+        clear.setMinimumHeight(40)
+        clear.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        clear.setIcon(self._print_icon("clear"))
+        clear.setIconSize(QSize(22, 22))
+        clear.clicked.connect(self._clear_sheet)
+        buttons.addWidget(self.print_button)
+        buttons.addWidget(clear)
         layout.addLayout(buttons)
+        self._fill_printers()
         tabs = QTabWidget()
         tabs.addTab(self._print_size_tab(), "Размеры")
         tabs.addTab(self._print_options_tab(), "Параметры")
@@ -287,6 +306,23 @@ class SheetMixin:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor("#3d7ad6"))
             painter.drawEllipse(17, 3, 5, 5)
+        painter.end()
+        return QIcon(pix)
+
+    def _gear_icon(self) -> QIcon:
+        pix = QPixmap(20, 20)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor("#2a62c9"), 1.6))
+        painter.translate(10, 10)
+        for step in range(8):
+            painter.drawLine(0, 6, 0, 9)
+            painter.rotate(45)
+        painter.setBrush(QColor("#d6e6f8"))
+        painter.drawEllipse(-5, -5, 10, 10)
+        painter.setBrush(QColor("#2a62c9"))
+        painter.drawEllipse(-2, -2, 4, 4)
         painter.end()
         return QIcon(pix)
 
@@ -382,8 +418,6 @@ class SheetMixin:
         self.center_box.setToolTip("Ряд остаётся по центру листа, верх кадров — у верхнего поля")
         self.center_box.setChecked(self.settings.align_center)
         self.center_box.toggled.connect(lambda checked: setattr(self.settings, "align_center", checked))
-        self.ask_printer_box = QCheckBox("Показывать диалог принтера")
-        self.ask_printer_box.setChecked(self.settings.show_print_dialog)
         self.clear_after_box = QCheckBox("Очищать после печати")
         self.clear_after_box.setChecked(self.settings.clear_after_print)
         self.footer_box = QCheckBox("Рекламный колонтитул")
@@ -405,9 +439,9 @@ class SheetMixin:
         for box in (self.overlap_box, self.inside_box, self.footer_box, self.snap_box):
             box.toggled.connect(self._paper_changed)
         self.cut_style.currentIndexChanged.connect(self._paper_changed)
-        for box in (self.overlap_box, self.inside_box, self.center_box, self.ask_printer_box, self.clear_after_box, self.footer_box):
+        for box in (self.overlap_box, self.inside_box, self.center_box, self.clear_after_box, self.footer_box):
             layout.addWidget(box)
-        for box in (self.center_box, self.ask_printer_box, self.clear_after_box):
+        for box in (self.center_box, self.clear_after_box):
             box.toggled.connect(lambda _checked=False: self._remember())
         self.cut_width = QDoubleSpinBox()
         self.cut_width.setRange(0.05, 2.0)
@@ -435,7 +469,13 @@ class SheetMixin:
         layout.setContentsMargins(8, 8, 8, 6)
         choose = QPushButton("Выбрать логотип")
         choose.clicked.connect(self._choose_logo)
-        layout.addWidget(choose)
+        place_logo = QPushButton("Добавить на лист")
+        place_logo.clicked.connect(self._add_logo)
+        logo_row = QHBoxLayout()
+        logo_row.setSpacing(4)
+        logo_row.addWidget(choose)
+        logo_row.addWidget(place_logo)
+        layout.addLayout(logo_row)
         self._logo_path = self.settings.logo_path
         self.logo_auto_box = QCheckBox("Автодобавление при размещении фотографий")
         self.logo_auto_box.setChecked(self.settings.logo_auto)
@@ -1175,31 +1215,118 @@ class SheetMixin:
         self._record(number)
         self.statusBar().showMessage(f"Лист {path}")
 
+    def _known_printers(self) -> list[str]:
+        names = winprint.printer_names()
+        if names:
+            return names
+        from PySide6.QtPrintSupport import QPrinterInfo
+
+        return [name for name in QPrinterInfo.availablePrinterNames() if name]
+
+    def _fill_printers(self) -> None:
+        names = self._known_printers()
+        saved = self.settings.printer_name.strip()
+        preferred = saved if saved in names else (winprint.default_printer() or (names[0] if names else ""))
+        self.printer_box.blockSignals(True)
+        self.printer_box.clear()
+        self.printer_box.addItem("В файл", "file")
+        for name in names:
+            self.printer_box.addItem(name, name)
+        if not names or saved == "file":
+            self.printer_box.setCurrentIndex(0)
+        else:
+            index = self.printer_box.findData(preferred)
+            self.printer_box.setCurrentIndex(index if index >= 0 else 0)
+        self.printer_box.setEnabled(True)
+        self.printer_box.blockSignals(False)
+        self._sync_output_button()
+
+    def _sync_output_button(self) -> None:
+        to_file = self.printer_box.currentData() == "file"
+        self.printer_gear.setEnabled(not to_file)
+        button = self.print_button
+        if button is None:
+            return
+        button.setEnabled(True)
+        button.setToolTip("")
+        if to_file:
+            button.setText("Сохранить лист")
+            button.setIcon(self._print_icon("save"))
+        else:
+            button.setText("Печать")
+            button.setIcon(self._print_icon("print"))
+
+    def _output_sheet(self) -> None:
+        if self.printer_box.currentData() == "file":
+            self.save_sheet()
+            return
+        self.print_sheet()
+
+    def _printer_picked(self, _index: int) -> None:
+        name = str(self.printer_box.currentData() or "")
+        self.settings.printer_name = name
+        self._sync_output_button()
+        self._remember()
+
+    def _configure_printer(self) -> None:
+        name = str(self.printer_box.currentData() or "")
+        if not name:
+            return
+        if sys.platform == "win32":
+            data = winprint.configure(name, int(self.winId()))
+            if data:
+                winprint.save_devmode(name, data)
+            return
+        from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPrinterName(name)
+        QPrintDialog(printer, self).exec()
+
+    def _print_with_qt(self, name: str, sheets: list, dpi: int) -> str | None:
+        from PySide6.QtGui import QPainter
+        from PySide6.QtPrintSupport import QPrinter
+
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setPrinterName(name)
+        painter = QPainter()
+        if not painter.begin(printer):
+            return "Принтер не принял задание"
+        try:
+            for index, sheet in enumerate(sheets):
+                if index and not printer.newPage():
+                    return "Принтер не принял следующую страницу"
+                image = pil_to_pixmap(self._compose_sheet(dpi, sheet)).toImage()
+                rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+                painter.drawImage(rect, image)
+        finally:
+            painter.end()
+        return None
+
     def print_sheet(self) -> None:
         self.pages[self.page_index] = self.doc
         sheets = [page for page in self.pages if any(item.kind == "photo" for item in page.items)]
         if not sheets:
             QMessageBox.information(self, "Печать", "На листе нет кадров.")
             return
-        if self.ask_printer_box.isChecked():
-            choice = self._printer_dialog()
-            if choice is None:
-                return
-            printer_name, copies = choice
-        else:
-            printer_name = self.settings.printer_name or winprint.default_printer()
-            copies = 1
-            if not printer_name:
-                QMessageBox.warning(self, "Печать", "Принтер не выбран. Включите диалог печати и укажите его.")
-                return
+        printer_name = str(self.printer_box.currentData() or "")
+        if printer_name == "file":
+            self.save_sheet()
+            return
+        if not printer_name:
+            self.statusBar().showMessage("В системе нет принтеров")
+            return
         dpi = self.settings.printer_dpi or EXPORT_DPI
-        pages = []
-        for sheet in sheets:
-            image = pil_to_pixmap(self._compose_sheet(dpi, sheet)).toImage().convertToFormat(QImage.Format.Format_RGB32)
-            bits = image.constBits()
-            raw = bits.tobytes() if isinstance(bits, memoryview) else bytes(bits)
-            pages.append((image.width(), image.height(), image.bytesPerLine(), raw))
-        error = winprint.print_images(printer_name, pages, copies)
+        if sys.platform == "win32":
+            pages = []
+            for sheet in sheets:
+                image = pil_to_pixmap(self._compose_sheet(dpi, sheet)).toImage().convertToFormat(QImage.Format.Format_RGB32)
+                bits = image.constBits()
+                raw = bits.tobytes() if isinstance(bits, memoryview) else bytes(bits)
+                pages.append((image.width(), image.height(), image.bytesPerLine(), raw))
+            error = winprint.print_images(printer_name, pages, 1)
+        else:
+            error = self._print_with_qt(printer_name, sheets, dpi)
         if error:
             QMessageBox.warning(self, "Печать", error)
             return
@@ -1207,58 +1334,3 @@ class SheetMixin:
         self._record(next_number(folder))
         if self.clear_after_box.isChecked():
             self._clear_sheet()
-
-    def _printer_dialog(self) -> tuple[str, int] | None:
-        """Короткое окно: принтер, параметры драйвера и число копий."""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Печать")
-        names = winprint.printer_names()
-        saved = self.settings.printer_name.strip()
-        if saved and saved not in names:
-            names.insert(0, saved)
-        if not names:
-            QMessageBox.warning(self, "Печать", "В системе нет принтеров.")
-            return None
-        combo = QComboBox()
-        combo.addItems(names)
-        preferred = saved if saved in names else winprint.default_printer()
-        found = combo.findText(preferred)
-        if found >= 0:
-            combo.setCurrentIndex(found)
-        setup = QPushButton("Настроить...")
-        copies = QSpinBox()
-        copies.setRange(1, 99)
-        copies.setValue(1)
-        copies.setFixedWidth(70)
-
-        def on_setup() -> None:
-            name = combo.currentText().strip()
-            data = winprint.configure(name, int(dialog.winId()))
-            if data:
-                winprint.save_devmode(name, data)
-
-        setup.clicked.connect(on_setup)
-        buttons = QDialogButtonBox()
-        buttons.addButton("Ок", QDialogButtonBox.ButtonRole.AcceptRole)
-        buttons.addButton("Отмена", QDialogButtonBox.ButtonRole.RejectRole)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Принтер:"))
-        row.addWidget(combo, 1)
-        row.addWidget(setup)
-        copy_row = QHBoxLayout()
-        copy_row.addWidget(QLabel("Число копий:"))
-        copy_row.addWidget(copies)
-        copy_row.addStretch(1)
-        layout = QVBoxLayout(dialog)
-        layout.addLayout(row)
-        layout.addLayout(copy_row)
-        layout.addWidget(buttons)
-        dialog.setMinimumWidth(420)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return None
-        name = combo.currentText().strip()
-        self.settings.printer_name = name
-        save_settings(self.settings)
-        return name, int(copies.value())

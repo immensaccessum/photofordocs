@@ -29,7 +29,7 @@ from photofordocs.imageops import (
     replace_background,
     zoom_shift_for_box,
 )
-from photofordocs.session import SheetDoc, SheetItem, read_ready, ready_belongs, ready_photo_path, write_ready_info
+from photofordocs.session import SheetDoc, SheetItem, read_ready, ready_belongs, ready_copy_path, ready_photo_path, write_ready_info
 from photofordocs.sheet import PAPERS, plan_sheet, render_document, render_sheet
 
 
@@ -546,6 +546,17 @@ class ReadyFolderTest(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0]["format_id"], "passport-rf")
             self.assertEqual(records[0]["name"], "Паспорт РФ")
+            copy, number = ready_copy_path(photo)
+            self.assertEqual(number, 2)
+            self.assertEqual(copy.name, "клиент.Паспорт РФ 2.jpg")
+            copy.write_bytes(b"jpeg")
+            write_ready_info(copy, {"format_id": "passport-rf", "name": "Паспорт РФ 2", "printed": False, "source": source.name})
+            self.assertTrue(ready_belongs(source, copy.name, stems))
+            self.assertFalse(ready_belongs(neighbor, copy.name, stems))
+            again, again_number = ready_copy_path(photo)
+            self.assertEqual(again_number, 3)
+            rows = read_ready(source, stems, names={})
+            self.assertEqual({row["name"] for row in rows}, {"Паспорт РФ", "Паспорт РФ 2"})
 
     def test_original_ready_file_is_attached_to_the_source(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

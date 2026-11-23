@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import subprocess
 from dataclasses import replace
@@ -10,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageCms
 from PySide6.QtCore import QDir, QEvent, QFileSystemWatcher, QMimeData, QPoint, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QActionGroup, QColor, QDrag, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QPainter, QPalette, QPen, QPixmap, QPolygon, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QDrag, QGuiApplication, QIcon, QImage, QImageReader, QKeySequence, QPalette, QPixmap, QPolygon, QShortcut
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -66,6 +67,7 @@ from photofordocs.imageops import (
     detected_eye_t,
     downscale,
     contain_guides,
+    corner_mode_from_format,
     format_eye_t,
     head_share,
     head_pose_pixels,
@@ -112,7 +114,6 @@ from photofordocs.session import (
     load_scheme,
     load_settings,
     next_number,
-    paper_mm,
     sheet_edges,
     _slot,
     append_photos,
@@ -127,7 +128,7 @@ from photofordocs.session import (
     SCHEMES_DIR,
 )
 from photofordocs.phs import import_phs
-from photofordocs.sheet import PAPERS, Paper, plan_sheet, render_document
+from photofordocs.sheet import PAPERS, render_document
 from photofordocs.shot import Shot
 from photofordocs.widgets import (
     EXPORT_DPI,
@@ -160,8 +161,6 @@ class FrameMixin:
         buttons = (
             self._action_button("save", "Сохранить\nфото", self.save_photo),
             self._action_button("save-file", "Сохранить\nв файл", self.save_photo_as),
-            self._action_button("print", "Печать", self._print_from_panel),
-            self._action_button("pencil", "Редактор", self._external_editor),
         )
         grid = QGridLayout()
         grid.setSpacing(4)
@@ -214,6 +213,7 @@ class FrameMixin:
         self.actions_panel = self._actions_box()
         layout.addWidget(self.actions_panel)
         layout.addWidget(self._format_params_box())
+        layout.addWidget(self._frame_preview_box())
         layout.addStretch(1)
         page.setMinimumWidth(240)
         scroll = self._scroll(page)
@@ -236,20 +236,14 @@ class FrameMixin:
         inner.addLayout(self._action_grid())
         return box
 
-    def _labeled_mm(self, title: str, spin: QDoubleSpinBox) -> QWidget:
+    def _format_row(self, grid: QGridLayout, row: int, title: str, spin: QDoubleSpinBox) -> QLabel:
         spin.setSuffix("")
-        spin.setFixedWidth(92)
+        spin.setFixedWidth(self._spin_width("260.0"))
         spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        host = QWidget()
-        column = QVBoxLayout(host)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(2)
         label = QLabel(title)
-        label.setWordWrap(True)
-        label.setMinimumWidth(92)
-        column.addWidget(label)
-        column.addWidget(spin)
-        return host
+        grid.addWidget(label, row, 0)
+        grid.addWidget(spin, row, 1, 1, 1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return label
 
     def _format_params_box(self) -> QGroupBox:
         box = QGroupBox("Параметры формата")
@@ -267,39 +261,58 @@ class FrameMixin:
         self.retouch.hide()
         self.ready_gray = QCheckBox("Цветная")
         self.ready_gray.setChecked(True)
-        self.corner_on = QCheckBox("Уголок")
         self.corner = QComboBox()
-        self.corner.addItem("Как в формате", "format")
-        self.corner.addItem("Прямой слева", "straight-left")
-        self.corner.addItem("Прямой справа", "straight-right")
-        self.corner.addItem("Круглый слева", "round-left")
+        self.corner.addItem("Без уголка", "none")
         self.corner.addItem("Круглый справа", "round-right")
-        self.corner.setToolTip("Левый и правый уголок ставятся снизу. Прямой — треугольник, круглый — четверть круга из угла.")
+        self.corner.addItem("Круглый слева", "round-left")
+        self.corner.addItem("Прямой справа", "straight-right")
+        self.corner.addItem("Прямой слева", "straight-left")
+        self.corner.setToolTip("Уголок ставится снизу. Прямой — треугольник, круглый — четверть круга из угла.")
         self.corner_radius = self._mm_box(0.5, 40, 18)
-        self.corner_radius.setFixedWidth(92)
-        self.corner_radius.setToolTip("Размер среза от угла кадра, в миллиметрах.")
-        radius_row = QHBoxLayout()
-        radius_row.addWidget(QLabel("Радиус"))
-        radius_row.addWidget(self.corner_radius)
-        radius_row.addStretch(1)
+        self.corner_radius.setFixedWidth(self._spin_width("260.0"))
+        self.corner_radius.setToolTip("Радиус уголка, размер среза от угла кадра, в миллиметрах.")
         grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
-        grid.addWidget(self._labeled_mm("Ширина", self.fmt_width), 0, 0)
-        grid.addWidget(self._labeled_mm("Высота", self.fmt_height), 0, 1)
-        grid.addWidget(self._labeled_mm("Верх. поле", self.fmt_top), 1, 0)
-        grid.addWidget(self._labeled_mm("Нижн. поле", self.fmt_bottom), 1, 1)
-        grid.addWidget(self._labeled_mm("Голова", self.fmt_head), 2, 0)
-        flags = QHBoxLayout()
-        flags.addWidget(self.ready_gray)
-        flags.addWidget(self.corner_on)
-        flags.addStretch(1)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+        size = QHBoxLayout()
+        size.setContentsMargins(0, 0, 0, 0)
+        size.setSpacing(6)
+        for title, spin in (("Ширина", self.fmt_width), ("Высота", self.fmt_height)):
+            spin.setSuffix("")
+            spin.setFixedWidth(self._spin_width("260.0"))
+            spin.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            size.addWidget(QLabel(title))
+            size.addWidget(spin)
+            if title == "Ширина":
+                size.addSpacing(8)
+        size.addStretch(1)
+        grid.addLayout(size, 0, 0, 1, 2)
+        self._format_row(grid, 1, "Верх. поле", self.fmt_top)
+        self.fmt_bottom_label = self._format_row(grid, 2, "Нижн. поле", self.fmt_bottom)
+        self.fmt_head_label = self._format_row(grid, 3, "Голова", self.fmt_head)
+        corner_row = QHBoxLayout()
+        corner_row.setContentsMargins(0, 0, 0, 0)
+        corner_row.setSpacing(6)
+        corner_row.addWidget(self.corner, 1)
+        corner_row.addWidget(self.corner_radius)
         layout = QVBoxLayout(box)
-        layout.setSpacing(8)
+        layout.setContentsMargins(4, 8, 4, 4)
+        layout.setSpacing(4)
         layout.addLayout(grid)
-        layout.addLayout(flags)
-        layout.addWidget(self.corner)
-        layout.addLayout(radius_row)
+        layout.addLayout(corner_row)
+        layout.addWidget(self.ready_gray)
+        box.setMinimumWidth(220)
+        return box
+
+    def _frame_preview_box(self) -> QGroupBox:
+        box = QGroupBox("Готовый кадр")
+        layout = QVBoxLayout(box)
+        self.format_preview = QLabel("Нет кадра")
+        self.format_preview.setObjectName("framepreview")
+        self.format_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.format_preview.setMinimumHeight(180)
+        self.format_preview.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        layout.addWidget(self.format_preview)
         self.head_share = QLabel("Голова —")
         self.head_share.setWordWrap(True)
         self.head_share.setToolTip(
@@ -308,15 +321,16 @@ class FrameMixin:
             "если высоту кадра разделить на десять равных частей."
         )
         layout.addWidget(self.head_share)
-        box.setMinimumWidth(220)
+        self.frame_overhang = QLabel("")
+        self.frame_overhang.setWordWrap(True)
+        layout.addWidget(self.frame_overhang)
         return box
 
     def _wire_formats(self) -> None:
         self.format_box.currentIndexChanged.connect(self._on_format_picked)
         for box in (self.fmt_width, self.fmt_height, self.fmt_top, self.fmt_bottom):
             box.valueChanged.connect(self._format_fields_edited)
-        self.corner.currentIndexChanged.connect(lambda _i: self.refresh())
-        self.corner_on.toggled.connect(self._corner_toggled)
+        self.corner.currentIndexChanged.connect(self._corner_picked)
         self.corner_radius.valueChanged.connect(self._corner_radius_edited)
         self.ready_gray.toggled.connect(lambda _v: self.refresh())
         self.retouch.toggled.connect(self._apply_retouch)
@@ -438,12 +452,9 @@ class FrameMixin:
         self._format_lock = True
         self._apply_spin_units(base)
         show_bottom = base.two_points and not base.have_corner
-        bottom_host = self.fmt_bottom.parentWidget()
-        if bottom_host is not None:
-            bottom_host.setVisible(show_bottom)
-        head_caption = self.fmt_head.parentWidget().findChild(QLabel) if self.fmt_head.parentWidget() else None
-        if head_caption is not None:
-            head_caption.setText("Голова" if base.two_points else "Глаза — подбородок")
+        self.fmt_bottom.setVisible(show_bottom)
+        self.fmt_bottom_label.setVisible(show_bottom)
+        self.fmt_head_label.setText("Голова" if base.two_points else "Глаза — подбородок")
         self.fmt_head.setToolTip(
             "Расстояние от макушки до подбородка."
             if base.two_points
@@ -463,9 +474,10 @@ class FrameMixin:
         dpi = base.file_dpi if base.kind == 1 or base.max_file_kb else self.settings.export_dpi
         self.dpi_box.setValue(int(dpi or self.settings.export_dpi or EXPORT_DPI))
         self.ready_gray.setChecked(base.colored)
-        self.corner_on.setChecked(base.have_corner and base.corner_placement != 0)
+        mode = corner_mode_from_format(base)
+        index = self.corner.findData(mode)
+        self.corner.setCurrentIndex(index if index >= 0 else 0)
         self.corner_radius.setValue(base.corner_rx_mm if base.corner_rx_mm > 0 else 18.0)
-        self._sync_corner_controls()
         self._format_lock = False
 
     def _sync_head(self) -> None:
@@ -507,8 +519,7 @@ class FrameMixin:
             self.sharpness.setValue(max(30, min(100, round(koeff * 100))))
         self.refresh()
 
-    def _corner_toggled(self, _on: bool) -> None:
-        self._sync_corner_controls()
+    def _corner_picked(self, _index: int) -> None:
         if self._format_lock:
             return
         self.refresh()
@@ -518,18 +529,11 @@ class FrameMixin:
             return
         self.refresh()
 
-    def _sync_corner_controls(self) -> None:
-        on = self.corner_on.isChecked()
-        self.corner.setEnabled(on)
-        self.corner_radius.setEnabled(on)
-
     def _wants_gray(self) -> bool:
         return not self.ready_gray.isChecked()
 
     def _corner_name(self) -> str:
-        if not self.corner_on.isChecked():
-            return "none"
-        return str(self.corner.currentData() or "format")
+        return str(self.corner.currentData() or "none")
 
     def _allow_rotate(self, value: bool) -> None:
         self.allow_rotate = value
@@ -538,14 +542,6 @@ class FrameMixin:
         if shot is not None and not value:
             shot.angle = 0.0
             self.refresh()
-
-    def _print_from_panel(self) -> None:
-        if not self.ready:
-            self._to_ready(switch=False)
-        if not self.doc.items:
-            self._send_to_sheet()
-        else:
-            self._set_mode("print")
 
     def _bind_hotkeys(self) -> None:
         for shortcut in self._hotkeys:
@@ -642,10 +638,14 @@ class FrameMixin:
         shot = self.current_shot()
         if shot is None:
             self._show_head_share(None, None, None)
+            self._show_overhang(None, None)
+            self.source.set_frame(QPixmap(), None, None)
+            self._show_finished()
             return
         crop = self._crop(shot)
         guide = self._shot_guide_ratios(shot, crop)
         self._show_head_share(shot, crop, guide)
+        self._show_overhang(shot, crop)
         self.source.set_frame(
             pil_to_pixmap(shot.working),
             crop,
@@ -658,62 +658,55 @@ class FrameMixin:
             self._show_finished()
 
     def _update_size_preview(self) -> None:
-        if not hasattr(self, "format_preview"):
+        label = getattr(self, "format_preview", None)
+        if label is None:
             return
-        shot = self.current_shot()
-        if shot is None:
-            self.format_preview.setPixmap(QPixmap())
-            self._fill_copies(None)
+        image = self._render_finished() if hasattr(self, "_render_finished") else None
+        if image is None:
+            label.setPixmap(QPixmap())
+            label.setText("Нет кадра")
             return
-        fmt = self.current_format()
-        crop = self._crop(shot)
-        box = (
-            max(0, int(crop.left)),
-            max(0, int(crop.top)),
-            min(shot.working.width, int(crop.left + crop.width)),
-            min(shot.working.height, int(crop.top + crop.height)),
+        label.setText("")
+        label.setPixmap(
+            pil_to_pixmap(image).scaled(
+                200,
+                260,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
-        if box[2] <= box[0] or box[3] <= box[1]:
-            self.format_preview.setPixmap(QPixmap())
-            self._fill_copies(None)
-            return
-        pix = pil_to_pixmap(shot.working.crop(box)).scaled(
-            72,
-            96,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        guide = QPixmap(pix)
-        painter = QPainter(guide)
-        if fmt.height_mm > 0:
-            y = int(pix.height() * (float(self.fmt_top.value()) / fmt.height_mm))
-            painter.setPen(QPen(QColor("#d02020"), 1, Qt.PenStyle.DotLine))
-            painter.drawLine(2, y, max(2, pix.width() - 2), y)
-        painter.end()
-        self.format_preview.setPixmap(guide)
-        self._fill_copies(guide)
 
-    def _fill_copies(self, pix: QPixmap | None) -> None:
-        while self.copy_row.count():
-            item = self.copy_row.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if pix is None or pix.isNull():
+    def _show_overhang(self, shot: Shot | None, crop) -> None:
+        """Под превью: строка только если рамка вышла за край снимка."""
+        note = getattr(self, "frame_overhang", None)
+        if note is None:
             return
-        fmt = self.current_format()
-        count = max(1, fmt.default_count)
-        width, height = paper_mm(self.doc)
-        plan = plan_sheet(fmt, Paper("sheet", "", width, height), self.doc.margin_mm, self.doc.gap_mm)
-        if plan.fits:
-            count = max(count, plan.count)
-        count = min(12, count)
-        thumb = pix.scaled(28, 36, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        for _ in range(count):
-            label = QLabel()
-            label.setPixmap(thumb)
-            self.copy_row.addWidget(label)
-        self.copy_row.addStretch(1)
+        if shot is None or crop is None or crop.height < 1:
+            note.setText("")
+            note.setStyleSheet("")
+            return
+        width, height = shot.working.size
+        angle = math.radians(shot.angle if self.allow_rotate else 0.0)
+        cos, sin = math.cos(angle), math.sin(angle)
+        cx = crop.left + crop.width / 2
+        cy = crop.top + crop.height / 2
+        xs: list[float] = []
+        ys: list[float] = []
+        for dx, dy in (
+            (-crop.width / 2, -crop.height / 2),
+            (crop.width / 2, -crop.height / 2),
+            (crop.width / 2, crop.height / 2),
+            (-crop.width / 2, crop.height / 2),
+        ):
+            xs.append(cx + dx * cos - dy * sin)
+            ys.append(cy + dx * sin + dy * cos)
+        over = max(0.0, -min(xs), max(xs) - width, -min(ys), max(ys) - height)
+        if over < 0.5:
+            note.setText("")
+            note.setStyleSheet("")
+            return
+        note.setText("Рамка выходит за снимок")
+        note.setStyleSheet("color: #b42318; font-weight: 600;")
 
     def _contain(self, shot: Shot) -> None:
         fmt = self.current_format()
@@ -781,16 +774,6 @@ class FrameMixin:
             shot.eye_line = shot.eye_t
         self._contain(shot)
         self._capture_ends(shot)
-        self.refresh()
-
-    def reset_frame(self) -> None:
-        shot = self.current_shot()
-        if shot is None:
-            return
-        self._reset_shot_frame(shot)
-        shot.brightness = shot.contrast = shot.gamma = shot.saturation = shot.sharpness = 0
-        shot.black_point, shot.white_point = 0, 255
-        self._load_tone(shot)
         self.refresh()
 
     def _pose_for_format(self, shot: Shot, fmt: Format) -> tuple[float, float, float, float, float]:

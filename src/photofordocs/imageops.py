@@ -931,6 +931,23 @@ def histogram(image: Image.Image, channel: str = "luma", clip_peaks: bool = Fals
     return values
 
 
+def corner_mode_from_format(fmt: Format) -> str:
+    """Короткий режим уголка, который показывает панель кадра.
+
+    Без уголка, круглый или прямой, снизу справа или слева.
+    Если отмечены оба нижних угла, берётся правый: в списке панели один угол.
+    """
+    if not fmt.have_corner or not fmt.corner_placement:
+        return "none"
+    right = bool(fmt.corner_placement & 8)
+    left = bool(fmt.corner_placement & 2)
+    if not right and not left:
+        return "none"
+    side = "right" if right else "left"
+    shape = "straight" if fmt.corner_kind == 0 else "round"
+    return f"{shape}-{side}"
+
+
 def resolve_corner(fmt: Format, mode: str) -> tuple[int, int, float, float]:
     """Положение, вид и радиусы уголка в миллиметрах.
 

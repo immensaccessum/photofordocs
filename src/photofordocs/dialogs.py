@@ -220,10 +220,14 @@ class SettingsDialog(QDialog):
         form = QFormLayout(page)
         self.currency = QLineEdit(self.settings.currency)
         self.currency.setMaximumWidth(120)
+        self.theme = QComboBox()
+        self.theme.addItem("Авто", "auto")
+        self.theme.addItem("Светлая", "light")
+        self.theme.addItem("Тёмная", "dark")
+        found = self.theme.findData(self.settings.theme)
+        self.theme.setCurrentIndex(found if found >= 0 else 0)
         form.addRow("Валюта", self.currency)
-        note = QLabel("Цвет панелей и камера ColorRiver здесь не повторяются.")
-        note.setWordWrap(True)
-        form.addRow(note)
+        form.addRow("Тема", self.theme)
         return page
 
     def _frame_page(self) -> QWidget:
@@ -363,8 +367,6 @@ class SettingsDialog(QDialog):
         self.place_orient.setCurrentIndex(1 if self.settings.place_horizontal else 0)
         self.check_margins = QCheckBox("При печати проверять выход размеров листа за поля")
         self.check_margins.setChecked(self.settings.check_margins)
-        self.hide_printer = QCheckBox("Не показывать диалог выбора принтера перед печатью")
-        self.hide_printer.setChecked(not self.settings.show_print_dialog)
         self.align = QCheckBox("Выравнивать фотографии по центру у верхнего края")
         self.align.setChecked(self.settings.align_center)
         self.retouch = QSpinBox()
@@ -374,7 +376,7 @@ class SettingsDialog(QDialog):
         row = QHBoxLayout()
         row.addWidget(QLabel("Коэффициент растушевки уголков (100 — резкая, 40 — плавная)"))
         row.addWidget(self.retouch)
-        for box in (self.ask_delete, self.skip_count, self.check_margins, self.hide_printer, self.align):
+        for box in (self.ask_delete, self.skip_count, self.check_margins, self.align):
             layout.addWidget(box)
         orient = QHBoxLayout()
         orient.addWidget(QLabel("Ориентация кадра"))
@@ -394,6 +396,7 @@ class SettingsDialog(QDialog):
         self.settings.studio = self.studio.text().strip()
         self.settings.face_detect = self.face.isChecked()
         self.settings.currency = self.currency.text().strip() or "₽"
+        self.settings.theme = str(self.theme.currentData() or "auto")
         self.settings.white_frame_mm = float(self.white.value())
         self.settings.advert_text = self.advert.text().strip()
         self.settings.printer_dpi = int(self.photo_dpi.value())
@@ -417,7 +420,6 @@ class SettingsDialog(QDialog):
         self.settings.ask_place = not self.skip_count.isChecked()
         self.settings.place_horizontal = bool(self.place_orient.currentData())
         self.settings.check_margins = self.check_margins.isChecked()
-        self.settings.show_print_dialog = not self.hide_printer.isChecked()
         self.settings.align_center = self.align.isChecked()
         self.settings.retouch_koeff = self.retouch.value() / 100
         return self.settings

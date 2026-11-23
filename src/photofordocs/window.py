@@ -254,6 +254,7 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         ):
             button = self._glass_button(QToolButton())
             button.setObjectName("viewzoom")
+            button.setProperty("zoom_kind", kind)
             button.setIcon(self._zoom_icon(kind))
             button.setIconSize(QSize(18, 18))
             button.setFixedSize(28, 28)
@@ -285,7 +286,9 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         pix.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pix)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        blue = QColor("#2a62c9")
+        from photofordocs.theme import tokens
+
+        blue = QColor(tokens()["accent"])
         painter.setPen(QPen(blue, 1.4))
         if kind == "fit":
             painter.drawRect(5, 5, 8, 8)
@@ -344,6 +347,7 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         self.files.setDragDropMode(QTreeWidget.DragDropMode.DragOnly)
         self.files.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.files.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.files.setExpandsOnDoubleClick(False)
         self.files.itemClicked.connect(self._file_clicked)
         self.files.itemDoubleClicked.connect(self._file_activated)
         self.files.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -470,50 +474,50 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         self.splitter = splitter
         layout.addWidget(splitter)
         self._apply_workplace()
-        from photofordocs.theme import bind_theme
+        from photofordocs.theme import bind_theme, set_theme_choice
 
+        set_theme_choice(self.settings.theme)
         bind_theme(QApplication.instance())
         self.refresh_theme()
 
-    def _slider(self, low: int, high: int, value: int, handler) -> QSlider:
+    def _slider(self, low: int, high: int, value: int, handler, groove: str | None = None) -> QSlider:
         slider = UnitSlider(Qt.Orientation.Horizontal)
         slider.setRange(low, high)
         slider.setSingleStep(1)
         slider.setValue(value)
         slider.valueChanged.connect(handler)
-        self._paint_slider(slider, "#d5d5d5")
+        self._paint_slider(slider, groove)
         return slider
 
-    def _paint_slider(self, slider: QSlider, groove: str, *, remember: bool = True) -> None:
-        """Одна и та же круглая ручка. Цвет дорожки задаёт смысл ползунка."""
-        from photofordocs.theme import slider_chrome
+    def _paint_slider(self, slider: QSlider, groove: str | None = None, *, remember: bool = True) -> None:
+        """Одна и та же круглая ручка. Пустая дорожка берётся из темы, заданная остаётся подписью."""
+        from photofordocs.theme import tokens
 
-        if remember or not slider.property("base_groove"):
-            slider.setProperty("base_groove", groove)
-        handle, edge, border = slider_chrome()
+        if remember:
+            slider.setProperty("ink_groove", groove or "")
+        color = tokens()
+        track = slider.property("ink_groove") or color["slider"]
         slider.setStyleSheet(
             "QSlider::groove:horizontal {"
-            f" height: 8px; border-radius: 4px; border: 1px solid {border}; background: {groove};"
+            f" height: 8px; border-radius: 4px; border: 1px solid {color['slider_border']}; background: {track};"
             "}"
             "QSlider::handle:horizontal {"
             " width: 14px; height: 14px; margin: -4px 0; border-radius: 7px;"
-            f" background: {handle}; border: 1px solid {edge};"
+            f" background: {color['slider_handle']}; border: 1px solid {color['slider_edge']};"
             "}"
         )
 
     def refresh_theme(self) -> None:
-        """Ползунки держат свой цвет отдельно от общей таблицы, поэтому их перекрашиваем сами."""
-        from photofordocs.theme import is_dark
-
-        dark = is_dark()
+        """Ползунки и значки масштаба держат цвет отдельно от общей таблицы."""
         for slider in self.findChildren(UnitSlider):
-            groove = slider.property("base_groove") or "#d5d5d5"
-            if groove == "#d5d5d5" and dark:
-                groove = "#5a5a5a"
-            self._paint_slider(slider, groove, remember=False)
+            self._paint_slider(slider, remember=False)
+        for button in self.findChildren(QToolButton):
+            kind = button.property("zoom_kind")
+            if kind:
+                button.setIcon(self._zoom_icon(str(kind)))
 
     def _spin_width(self, sample: str) -> int:
-        return self.fontMetrics().horizontalAdvance(sample) + 20
+        return self.fontMetrics().horizontalAdvance(sample) + 36
 
     def _scroll(self, page: QWidget) -> QScrollArea:
         page.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -658,6 +662,7 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
             self._sizes_layout.insertWidget(0, self.actions_panel)
             self._sizes_layout.insertWidget(1, self.format_params)
         if mode == "print":
+            self._fill_printers()
             self._refresh_sheet()
             self.printer.fit()
             self.statusBar().showMessage("Печать: лист слева, параметры листа справа")
@@ -686,7 +691,8 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
             settings.check_overlap = self.overlap_box.isChecked()
             settings.check_margins = self.inside_box.isChecked()
             settings.align_center = self.center_box.isChecked()
-            settings.show_print_dialog = self.ask_printer_box.isChecked()
+            if hasattr(self, "ask_printer_box"):
+                settings.show_print_dialog = self.ask_printer_box.isChecked()
             settings.clear_after_print = self.clear_after_box.isChecked()
             settings.show_footer = self.footer_box.isChecked()
             settings.snap = self.snap_box.isChecked()
@@ -801,7 +807,8 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
             self.cut_style.setCurrentIndex(cut)
         self.inside_box.setChecked(self.settings.check_margins)
         self.overlap_box.setChecked(self.settings.check_overlap)
-        self.ask_printer_box.setChecked(self.settings.show_print_dialog)
+        if hasattr(self, "ask_printer_box"):
+            self.ask_printer_box.setChecked(self.settings.show_print_dialog)
         self.clear_after_box.setChecked(self.settings.clear_after_print)
         self.center_box.setChecked(self.settings.align_center)
         self.logo_auto_box.setChecked(self.settings.logo_auto)
@@ -905,6 +912,9 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         if take_settings.isChecked():
             self._apply_workplace()
             self._file_order = (self.settings.sort_key, self.settings.sort_reverse)
+            if hasattr(self, "_sort_held"):
+                self._sort_held[self.settings.sort_key] = self.settings.sort_reverse
+                self._sync_sort_buttons()
             folder = Path(self.settings.archive_root)
             if folder.is_dir():
                 self._show_folder(folder)
@@ -942,6 +952,11 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
             previous_advert = self.settings.advert_text
             self.settings = dialog.apply()
             save_settings(self.settings)
+            from photofordocs.theme import apply_chrome, set_theme_choice
+
+            set_theme_choice(self.settings.theme)
+            apply_chrome(QApplication.instance())
+            self.refresh_theme()
             if not self.footer.text().strip() or self.footer.text().strip() == previous_advert:
                 self.footer.setText(self.settings.advert_text)
             if not any(item.kind == "photo" for item in self.doc.items):
@@ -990,7 +1005,7 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         QMessageBox.information(
             self,
             "Справка",
-            "Слева выбираются диск, папка и файл. Один щелчок показывает превью, двойной открывает снимок.\n\n"
+            "Слева выбираются диск, папка и файл. Один щелчок показывает превью, двойной по оригиналу открывает «Размеры».\n\n"
             "«Размеры» задаёт рамку кадра. «Готовая фотография» показывает кадр после обрезки и коррекции. "
             "«Печать» раскладывает готовые кадры на листе.\n\n"
             "Гистограмма открывается из меню «Окна». Раскладка панели печати — из меню «Вид».",

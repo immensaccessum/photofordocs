@@ -145,6 +145,7 @@ class SheetCanvasTest(unittest.TestCase):
             settings.allow_rotate = True
             settings.logo_place = "top-left"
             settings.default_format = "passport-rf"
+            settings.theme = "dark"
             settings.quick_tunes = [{"name": "Тени", "tone": {"brightness": 1, "balance": [[0, 0, 0]]}}]
             session.save_settings(settings)
             loaded = session.load_settings()
@@ -155,6 +156,7 @@ class SheetCanvasTest(unittest.TestCase):
             self.assertTrue(loaded.allow_rotate)
             self.assertEqual(loaded.logo_place, "top-left")
             self.assertEqual(loaded.default_format, "passport-rf")
+            self.assertEqual(loaded.theme, "dark")
             self.assertEqual(loaded.quick_tunes[0]["name"], "Тени")
         finally:
             session.CONFIG_DIR = previous_dir

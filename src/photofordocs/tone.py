@@ -111,6 +111,7 @@ from photofordocs.session import (
     ready_belongs,
     ready_folder,
     ready_info_path,
+    ready_copy_path,
     ready_photo_path,
     write_ready_info,
     load_journal,
@@ -148,6 +149,24 @@ from photofordocs.widgets import (
     reveal_opened_branch,
 )
 
+
+def _groove(*stops: tuple[str, str]) -> str:
+    listed = ", ".join(f"stop:{place} {color}" for place, color in stops)
+    return f"qlineargradient(x1:0, y1:0, x2:1, y2:0, {listed})"
+
+
+# Слева меньшее значение, справа большее. Это подпись инструмента, не цвет окна.
+_GROOVE_BRIGHT = _groove(("0", "#2a2a2a"), ("1", "#f5f5f5"))
+_GROOVE_CONTRAST = _groove(("0", "#b5b5b5"), ("0.45", "#8d8d8d"), ("0.72", "#f4f4f4"), ("1", "#161616"))
+_GROOVE_GAMMA = _groove(("0", "#141414"), ("0.4", "#2e2e2e"), ("0.75", "#e6e6e6"), ("1", "#fafafa"))
+_GROOVE_SATURATION = _groove(("0", "#9a9a9a"), ("1", "#d23b2f"))
+_GROOVE_SHARP = _groove(("0", "#d5d5d5"), ("0.55", "#c4c4c4"), ("0.72", "#222222"), ("0.8", "#f2f2f2"), ("0.88", "#222222"), ("1", "#f7f7f7"))
+_GROOVE_BLACK = _groove(("0", "#111111"), ("1", "#7a7a7a"))
+_GROOVE_WHITE = _groove(("0", "#9a9a9a"), ("1", "#ffffff"))
+_GROOVE_SENSITIVITY = _groove(("0", "#f4f4f4"), ("1", "#7aa7d4"))
+_GROOVE_BRUSH = _groove(("0", "#e8e8e8"), ("1", "#5c6b7a"))
+
+
 class ToneMixin:
     def _finished_side(self) -> QScrollArea:
         page = QWidget()
@@ -180,14 +199,14 @@ class ToneMixin:
         sensitivity = 42
         if 0 < self.settings.ground_threshold <= 20:
             sensitivity = int(min(90, self.settings.ground_threshold * 10))
-        self.tolerance = self._slider(0, 100, sensitivity, self._store_tone)
-        self.bright = self._slider(-100, 100, int(self.settings.tone_brightness), self._store_tone)
-        self.contrast = self._slider(-100, 100, int(self.settings.tone_contrast), self._store_tone)
-        self.gamma = self._slider(-100, 100, int(self.settings.tone_gamma), self._store_tone)
-        self.saturation = self._slider(-100, 100, int(self.settings.tone_saturation), self._store_tone)
-        self.sharpness = self._slider(0, 100, int(self.settings.tone_sharpness), self._store_tone)
-        self.black = self._slider(0, 80, 0, self._store_tone)
-        self.white = self._slider(175, 255, 255, self._store_tone)
+        self.tolerance = self._slider(0, 100, sensitivity, self._store_tone, _GROOVE_SENSITIVITY)
+        self.bright = self._slider(-100, 100, int(self.settings.tone_brightness), self._store_tone, _GROOVE_BRIGHT)
+        self.contrast = self._slider(-100, 100, int(self.settings.tone_contrast), self._store_tone, _GROOVE_CONTRAST)
+        self.gamma = self._slider(-100, 100, int(self.settings.tone_gamma), self._store_tone, _GROOVE_GAMMA)
+        self.saturation = self._slider(-100, 100, int(self.settings.tone_saturation), self._store_tone, _GROOVE_SATURATION)
+        self.sharpness = self._slider(0, 100, int(self.settings.tone_sharpness), self._store_tone, _GROOVE_SHARP)
+        self.black = self._slider(0, 80, 0, self._store_tone, _GROOVE_BLACK)
+        self.white = self._slider(175, 255, 255, self._store_tone, _GROOVE_WHITE)
         self.balance = []
         for _band in range(3):
             row = []
@@ -222,7 +241,7 @@ class ToneMixin:
         reset_balance = QPushButton("Сброс по всем каналам")
         reset_balance.clicked.connect(self._reset_balance)
         color_layout.addWidget(reset_balance)
-        self.brush = self._slider(0, 200, int(self.settings.brush_px), self._store_tone)
+        self.brush = self._slider(0, 200, int(self.settings.brush_px), self._store_tone, _GROOVE_BRUSH)
         other_color = QPushButton("Другой цвет")
         other_color.clicked.connect(self._pick_background)
         background = QGroupBox("Фон")
@@ -273,7 +292,7 @@ class ToneMixin:
         tools_layout.addWidget(self._tone_line("Чёрная", self.black, 0))
         tools_layout.addWidget(self._tone_line("Белая", self.white, 255))
         reset = QPushButton("Сброс всех коррекций")
-        reset.clicked.connect(self.reset_frame)
+        reset.clicked.connect(self.reset_corrections)
         tools_layout.addWidget(reset)
         layout.addWidget(color)
         layout.addWidget(tools)
@@ -420,6 +439,16 @@ class ToneMixin:
             percent.blockSignals(True)
             percent.setValue(shown)
             percent.blockSignals(False)
+
+    def reset_corrections(self) -> None:
+        """Ползунки тона в ноль. Рамка, фон и цветовые каналы остаются."""
+        shot = self.current_shot()
+        if shot is None:
+            return
+        shot.brightness = shot.contrast = shot.gamma = shot.saturation = shot.sharpness = 0
+        shot.black_point, shot.white_point = 0, 255
+        self._load_tone(shot)
+        self._store_tone()
 
     def _reset_balance(self) -> None:
         for row in self.balance:
@@ -699,15 +728,14 @@ class ToneMixin:
         self._alpha_cache[id(shot)] = (key, array)
         return array
 
-    def _show_finished(self, smooth: bool = True) -> None:
+    def _render_finished(self):
+        """Готовый кадр в экранном размере: та же обрезка, тон и уголок, что на вкладке фотографии."""
         shot = self.current_shot()
         if shot is None:
-            self._finished_image = None
-            self.finished.set_photo(QPixmap(), smooth)
-            return
+            return None
         base = self._live_base(shot)
         preview = Image.fromarray(base, "RGB")
-        image = render_photo(
+        return render_photo(
             preview,
             Rect(0, 0, preview.width, preview.height),
             self.current_format(),
@@ -730,6 +758,13 @@ class ToneMixin:
             method=self._background_method(),
             paint=self._paint_background(),
         )
+
+    def _show_finished(self, smooth: bool = True) -> None:
+        image = self._render_finished()
+        if image is None:
+            self._finished_image = None
+            self.finished.set_photo(QPixmap(), smooth)
+            return
         self._finished_image = image
         self.finished.set_photo(pil_to_pixmap(image), smooth)
 
@@ -914,17 +949,18 @@ class ToneMixin:
             image = framed
         path = ready_photo_path(shot.path, fmt.name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and self.settings.confirm_overwrite:
-            answer = QMessageBox.question(self, "Сохранить фото", f"Заменить {path.name}?")
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        chosen = self._confirm_ready_path(path)
+        if chosen is None:
+            return
+        path, copy_number = chosen
+        label = fmt.name if copy_number == 0 else f"{fmt.name} {copy_number}"
         self._write_jpeg(image, path, dpi, self.settings.jpeg_photo, fmt.max_file_kb)
         write_ready_info(
             path,
             {
                 "source": shot.path.name,
                 "format_id": fmt.id,
-                "name": fmt.name,
+                "name": label,
                 "printed": False,
                 "dpi": dpi,
                 "width_mm": fmt.width_mm,
@@ -943,10 +979,37 @@ class ToneMixin:
             },
         )
         self._fill_files()
+        self._reveal_saved(shot.path, path)
         self._last_saved = str(path)
         number = next_number(self._archive_dir())
         self._record(number)
         self.statusBar().showMessage(f"Сохранено {path}")
+
+    def _confirm_ready_path(self, path: Path) -> tuple[Path, int] | None:
+        """Куда писать кадр: тот же файл или сосед с номером. None — отмена.
+
+        Второе число — 0, если имя формата остаётся как есть, иначе 2, 3 и дальше.
+        """
+        if not path.exists() or not self.settings.confirm_overwrite:
+            return path, 0
+        copy, number = ready_copy_path(path)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Сохранить фото")
+        box.setText(f"Файл {path.name} уже есть.")
+        box.setInformativeText(f"Рядом он сохранится как {copy.name}.")
+        replace = box.addButton("Заменить", QMessageBox.ButtonRole.DestructiveRole)
+        nearby = box.addButton("Сохранить рядом", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        nearby.setDefault(True)
+        box.setEscapeButton(cancel)
+        box.exec()
+        chosen = box.clickedButton()
+        if chosen is nearby:
+            return copy, number
+        if chosen is replace:
+            return path, 0
+        return None
 
     def save_photo_as(self) -> None:
         shot = self.current_shot()

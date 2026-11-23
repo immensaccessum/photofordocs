@@ -1,5 +1,6 @@
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from PIL import Image
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from photofordocs.imageops import FaceBox
@@ -51,7 +53,7 @@ class SheetPreviewCacheTest(unittest.TestCase):
         window = MainWindow()
         window._save_left_sizes = lambda: None
         try:
-            window.corner_on.setChecked(True)
+            window.corner.setCurrentIndex(window.corner.findData("round-right"))
             window.corner_radius.setValue(7.5)
             fmt = window.current_format()
             self.assertEqual(fmt.corner_rx_mm, 7.5)
@@ -106,6 +108,53 @@ class SheetPreviewCacheTest(unittest.TestCase):
             window._nudge_guide("eyes", 0, -30)
             self.assertNotEqual(window.head_share.text(), before)
             self.assertIn("% кадра", window.head_share.text())
+        finally:
+            window.close()
+            self._app.processEvents()
+
+    def test_deleting_the_open_photo_clears_every_view(self) -> None:
+        window = MainWindow()
+        window._save_left_sizes = lambda: None
+        window.settings.ask_before_delete = False
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                first = Path(folder) / "first.jpg"
+                second = Path(folder) / "second.jpg"
+                Image.new("RGB", (60, 80), (180, 40, 40)).save(first, quality=90)
+                Image.new("RGB", (60, 80), (40, 40, 180)).save(second, quality=90)
+                window.folder_root = Path(folder)
+                window._fill_files()
+                window._load_source(first)
+                window._load_source(second)
+                window._select_row(0)
+                fmt = window.current_format()
+                window.ready.append(ReadyItem("r1", str(first), fmt.id))
+                window.doc.items.append(
+                    SheetItem("p1", "photo", 4, 4, fmt.width_mm, fmt.height_mm, "r1", 0, "", str(first))
+                )
+                window._set_mode("ready")
+                window._show_finished()
+                for index in range(window.files.topLevelItemCount()):
+                    item = window.files.topLevelItem(index)
+                    if Path(str(item.data(0, Qt.ItemDataRole.UserRole))).name == "first.jpg":
+                        window.files.setCurrentItem(item)
+                window._delete_selected_file()
+                self.assertEqual([shot.path.name for shot in window.shots], ["second.jpg"])
+                self.assertEqual(window.current_shot().path.name, "second.jpg")
+                self.assertIsNotNone(window.source.crop)
+                self.assertEqual(window.ready, [])
+                self.assertEqual(window.doc.items, [])
+                self.assertEqual(window.printer.pixmaps, {})
+                for index in range(window.files.topLevelItemCount()):
+                    item = window.files.topLevelItem(index)
+                    if Path(str(item.data(0, Qt.ItemDataRole.UserRole))).name == "second.jpg":
+                        window.files.setCurrentItem(item)
+                window._delete_selected_file()
+                self.assertEqual(window.shots, [])
+                self.assertIsNone(window.current_shot())
+                self.assertIsNone(window.source.crop)
+                self.assertIsNone(window._finished_image)
+                self.assertEqual(window.format_preview.text(), "Нет кадра")
         finally:
             window.close()
             self._app.processEvents()
