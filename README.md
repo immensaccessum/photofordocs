@@ -4,7 +4,11 @@
 
 Linux, Windows, macOS. Python 3.11+. [Лицензия](LICENSE): пользоваться можно, продавать программу нельзя.
 
-## Запуск
+## Windows
+
+Скачать `photofordocs-windows.zip` из [релизов](https://github.com/immensaccessum/photofordocs/releases/latest). Распаковать и запустить `photofordocs.exe`. Python для этого не нужен.
+
+## Запуск из исходников
 
 ```bash
 python3 -m venv .venv

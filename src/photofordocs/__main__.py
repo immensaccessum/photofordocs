@@ -30,7 +30,8 @@ def _desktop_entry() -> None:
 
 
 def main() -> None:
-    _desktop_entry()
+    if sys.platform.startswith("linux"):
+        _desktop_entry()
     app = QApplication(sys.argv)
     install_indicator_style(app)
     app.setApplicationName(APP_ID)
