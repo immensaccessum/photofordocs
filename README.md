@@ -6,7 +6,7 @@ Linux, Windows, macOS. Python 3.11+. [Лицензия](LICENSE): пользов
 
 ## Windows
 
-Скачать `photofordocs-windows.zip` из [релизов](https://github.com/immensaccessum/photofordocs/releases/latest). Распаковать и запустить `photofordocs.exe`. Python для этого не нужен.
+Скачать `photofordocs-windows.zip` из [релизов](https://github.com/immensaccessum/photofordocs/releases/latest). Распаковать и запустить `photofordocs.exe`.
 
 ## Запуск из исходников
 
