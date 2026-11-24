@@ -137,7 +137,10 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
+        first = not getattr(self, "_ui_ready", False)
         self._ui_ready = True
+        if first:
+            QTimer.singleShot(0, self._restore_panel_widths)
 
     def focusInEvent(self, event) -> None:
         super().focusInEvent(event)
@@ -472,6 +475,7 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
         splitter.setStretchFactor(2, 0)
         splitter.setSizes([210, 720, 300])
         self.splitter = splitter
+        splitter.splitterMoved.connect(lambda *_args: self._left_save.start())
         layout.addWidget(splitter)
         self._apply_workplace()
         from photofordocs.theme import bind_theme, set_theme_choice
@@ -860,10 +864,6 @@ class MainWindow(FilesMixin, FrameMixin, ToneMixin, SheetMixin, QMainWindow):
             self.paint_box.blockSignals(True)
             self.paint_box.setChecked(bool(getattr(self.settings, "paint_background", False)))
             self.paint_box.blockSignals(False)
-        if self.settings.file_panel_width >= 180:
-            sizes = self.splitter.sizes()
-            if len(sizes) == 3:
-                self.splitter.setSizes([int(self.settings.file_panel_width), max(200, sizes[1]), sizes[2]])
         self._apply_saved_format()
         self._paper_changed()
 

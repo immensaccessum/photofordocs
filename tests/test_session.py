@@ -146,6 +146,11 @@ class SheetCanvasTest(unittest.TestCase):
             settings.logo_place = "top-left"
             settings.default_format = "passport-rf"
             settings.theme = "dark"
+            settings.file_panel_width = 280
+            settings.right_panel_width = 420
+            settings.sort_key = "date"
+            settings.sort_reverse = True
+            settings.print_copies = 4
             settings.quick_tunes = [{"name": "Тени", "tone": {"brightness": 1, "balance": [[0, 0, 0]]}}]
             session.save_settings(settings)
             loaded = session.load_settings()
@@ -157,6 +162,11 @@ class SheetCanvasTest(unittest.TestCase):
             self.assertEqual(loaded.logo_place, "top-left")
             self.assertEqual(loaded.default_format, "passport-rf")
             self.assertEqual(loaded.theme, "dark")
+            self.assertEqual(loaded.file_panel_width, 280)
+            self.assertEqual(loaded.right_panel_width, 420)
+            self.assertEqual(loaded.sort_key, "date")
+            self.assertTrue(loaded.sort_reverse)
+            self.assertEqual(loaded.print_copies, 4)
             self.assertEqual(loaded.quick_tunes[0]["name"], "Тени")
         finally:
             session.CONFIG_DIR = previous_dir

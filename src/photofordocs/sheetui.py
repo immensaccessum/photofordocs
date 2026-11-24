@@ -223,7 +223,15 @@ class SheetMixin:
         self.printer_gear.setFixedSize(26, 26)
         self.printer_gear.setToolTip("Настройки принтера")
         self.printer_gear.clicked.connect(self._configure_printer)
+        self.print_copies = QSpinBox()
+        self.print_copies.setRange(1, 99)
+        self.print_copies.setValue(max(1, min(99, int(self.settings.print_copies or 1))))
+        self.print_copies.setSuffix(" шт")
+        self.print_copies.setToolTip("Сколько копий листа отправить на принтер")
+        self.print_copies.setFixedWidth(self._spin_width("99 шт"))
+        self.print_copies.valueChanged.connect(self._print_copies_changed)
         printer_row.addWidget(self.printer_box, 1)
+        printer_row.addWidget(self.print_copies)
         printer_row.addWidget(self.printer_gear)
         layout.addLayout(printer_row)
         buttons = QHBoxLayout()
@@ -1244,6 +1252,9 @@ class SheetMixin:
     def _sync_output_button(self) -> None:
         to_file = self.printer_box.currentData() == "file"
         self.printer_gear.setEnabled(not to_file)
+        copies = getattr(self, "print_copies", None)
+        if copies is not None:
+            copies.setEnabled(not to_file)
         button = self.print_button
         if button is None:
             return
@@ -1261,6 +1272,16 @@ class SheetMixin:
             self.save_sheet()
             return
         self.print_sheet()
+
+    def _print_copies_changed(self, value: int) -> None:
+        self.settings.print_copies = max(1, int(value))
+        self._remember()
+
+    def _sheet_copies(self) -> int:
+        box = getattr(self, "print_copies", None)
+        if box is None or not box.isEnabled():
+            return 1
+        return max(1, int(box.value()))
 
     def _printer_picked(self, _index: int) -> None:
         name = str(self.printer_box.currentData() or "")
@@ -1289,16 +1310,21 @@ class SheetMixin:
 
         printer = QPrinter(QPrinter.PrinterMode.HighResolution)
         printer.setPrinterName(name)
+        copies = self._sheet_copies()
+        if printer.supportsMultipleCopies():
+            printer.setCopyCount(copies)
+            copies = 1
         painter = QPainter()
         if not painter.begin(printer):
             return "Принтер не принял задание"
         try:
-            for index, sheet in enumerate(sheets):
-                if index and not printer.newPage():
-                    return "Принтер не принял следующую страницу"
-                image = pil_to_pixmap(self._compose_sheet(dpi, sheet)).toImage()
-                rect = printer.pageRect(QPrinter.Unit.DevicePixel)
-                painter.drawImage(rect, image)
+            for _copy in range(copies):
+                for index, sheet in enumerate(sheets):
+                    if (_copy or index) and not printer.newPage():
+                        return "Принтер не принял следующую страницу"
+                    image = pil_to_pixmap(self._compose_sheet(dpi, sheet)).toImage()
+                    rect = printer.pageRect(QPrinter.Unit.DevicePixel)
+                    painter.drawImage(rect, image)
         finally:
             painter.end()
         return None
@@ -1324,7 +1350,7 @@ class SheetMixin:
                 bits = image.constBits()
                 raw = bits.tobytes() if isinstance(bits, memoryview) else bytes(bits)
                 pages.append((image.width(), image.height(), image.bytesPerLine(), raw))
-            error = winprint.print_images(printer_name, pages, 1)
+            error = winprint.print_images(printer_name, pages, self._sheet_copies())
         else:
             error = self._print_with_qt(printer_name, sheets, dpi)
         if error:

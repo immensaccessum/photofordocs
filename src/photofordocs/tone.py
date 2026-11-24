@@ -220,9 +220,11 @@ class ToneMixin:
         self.color_percents = []
         self.balance_band = QButtonGroup(self)
         color = QGroupBox("Цветокоррекция")
+        color.setObjectName("tonebox")
         color_layout = QVBoxLayout(color)
-        color_layout.setSpacing(8)
+        color_layout.setSpacing(4)
         band_row = QHBoxLayout()
+        band_row.setSpacing(6)
         for index, title in enumerate(("Тени", "Центр", "Блики")):
             radio = QRadioButton(title)
             self.balance_band.addButton(radio, index)
@@ -232,33 +234,41 @@ class ToneMixin:
         self.balance_band.idClicked.connect(lambda _band: self._sync_color_sliders())
         color_layout.addLayout(band_row)
         axes = (
-            ("Бирюзовый/красный", "#26c6da", "#ef5350"),
-            ("Пурпурный/зелёный", "#e040fb", "#43a047"),
-            ("Жёлтый/синий", "#fdd835", "#1e88e5"),
+            ("Бирюза", "Бирюзовый слева, красный справа", "#26c6da", "#ef5350"),
+            ("Пурпур", "Пурпурный слева, зелёный справа", "#e040fb", "#43a047"),
+            ("Жёлтый", "Жёлтый слева, синий справа", "#fdd835", "#1e88e5"),
         )
-        for channel, (title, left, right) in enumerate(axes):
-            color_layout.addWidget(self._color_axis(channel, title, left, right))
+        for channel, (title, tip, left, right) in enumerate(axes):
+            color_layout.addWidget(self._color_axis(channel, title, tip, left, right))
         reset_balance = QPushButton("Сброс по всем каналам")
         reset_balance.clicked.connect(self._reset_balance)
         color_layout.addWidget(reset_balance)
         self.brush = self._slider(0, 200, int(self.settings.brush_px), self._store_tone, _GROOVE_BRUSH)
-        other_color = QPushButton("Другой цвет")
+        other_color = QToolButton()
+        other_color.setText("…")
+        other_color.setFixedSize(22, 22)
+        other_color.setToolTip("Другой цвет")
         other_color.clicked.connect(self._pick_background)
         background = QGroupBox("Фон")
+        background.setObjectName("tonebox")
         background_layout = QVBoxLayout(background)
-        background_layout.setSpacing(8)
+        background_layout.setSpacing(4)
         background_layout.addWidget(self.replace_box)
         methods = QHBoxLayout()
         methods.addWidget(self.fill_edge)
         methods.addWidget(self.fill_figure)
         methods.addStretch(1)
         background_layout.addLayout(methods)
-        background_layout.addWidget(self._tone_line("Чувствительность", self.tolerance, None))
-        background_layout.addWidget(self._tone_line("Размер кисти", self.brush, None))
-        background_layout.addWidget(self.paint_box)
-        background_layout.addWidget(QLabel("Цвет фона"))
-        background_layout.addWidget(self.color_box)
-        background_layout.addWidget(other_color)
+        background_layout.addWidget(self._tone_line("Чувств.", self.tolerance, None, "Чувствительность замены фона"))
+        background_layout.addWidget(self._tone_line("Кисть", self.brush, None, "Размер кисти"))
+        paint = QHBoxLayout()
+        paint.setSpacing(6)
+        self.paint_box.setToolTip("Заменить цвет фона")
+        self.color_box.setToolTip("Цвет фона")
+        paint.addWidget(self.paint_box)
+        paint.addWidget(self.color_box, 1)
+        paint.addWidget(other_color)
+        background_layout.addLayout(paint)
         self.sharpness_box = QComboBox()
         self.sharpness_box.addItem("Нет", 0)
         self.sharpness_box.addItem("Слабая", 30)
@@ -268,18 +278,16 @@ class ToneMixin:
         self.sharpness.valueChanged.connect(lambda _value: self._sync_sharpness_box())
         self._sync_sharpness_box()
         tools = QGroupBox("Инструменты")
+        tools.setObjectName("tonebox")
         tools_layout = QVBoxLayout(tools)
-        tools_layout.setSpacing(8)
+        tools_layout.setSpacing(4)
         tools_layout.addWidget(self._tone_line("Яркость", self.bright, 0))
         tools_layout.addWidget(self._tone_line("Контраст", self.contrast, 0))
         tools_layout.addWidget(self._tone_line("Гамма", self.gamma, 0))
         tools_layout.addWidget(self._tone_line("Насыщ.", self.saturation, 0))
-        sharp_host = QWidget()
-        sharp_layout = QVBoxLayout(sharp_host)
-        sharp_layout.setContentsMargins(0, 0, 0, 0)
-        sharp_layout.setSpacing(2)
-        sharp_layout.addWidget(QLabel("Резкость"))
         sharp = QHBoxLayout()
+        sharp.setSpacing(6)
+        sharp.addWidget(self._tone_caption("Резкость"))
         sharp.addWidget(self.sharpness_box, 1)
         sharp_reset = QToolButton()
         sharp_reset.setText("×")
@@ -287,8 +295,7 @@ class ToneMixin:
         sharp_reset.setToolTip("Сбросить")
         sharp_reset.clicked.connect(lambda: self.sharpness.setValue(0))
         sharp.addWidget(sharp_reset)
-        sharp_layout.addLayout(sharp)
-        tools_layout.addWidget(sharp_host)
+        tools_layout.addLayout(sharp)
         tools_layout.addWidget(self._tone_line("Чёрная", self.black, 0))
         tools_layout.addWidget(self._tone_line("Белая", self.white, 255))
         reset = QPushButton("Сброс всех коррекций")
@@ -331,14 +338,24 @@ class ToneMixin:
         if hasattr(self, "paint_box"):
             settings.paint_background = self.paint_box.isChecked()
 
-    def _tone_line(self, title: str, slider: QSlider, neutral: int | None) -> QWidget:
+    def _tone_caption(self, title: str, tip: str = "") -> QLabel:
+        label = QLabel(title)
+        width = max(
+            self.fontMetrics().horizontalAdvance(name)
+            for name in ("Контраст", "Бирюза", "Пурпур", "Жёлтый", "Чувств.", "Резкость")
+        )
+        label.setFixedWidth(width + 6)
+        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        if tip:
+            label.setToolTip(tip)
+        return label
+
+    def _tone_line(self, title: str, slider: QSlider, neutral: int | None, tip: str = "") -> QWidget:
         host = QWidget()
-        layout = QVBoxLayout(host)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(QLabel(title))
-        row = QHBoxLayout()
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
+        row.addWidget(self._tone_caption(title, tip))
         number = QSpinBox()
         number.setRange(slider.minimum(), slider.maximum())
         number.setValue(slider.value())
@@ -364,16 +381,14 @@ class ToneMixin:
             reset.setToolTip("Сбросить")
             reset.clicked.connect(lambda: slider.setValue(neutral))
             row.addWidget(reset)
-        layout.addLayout(row)
         return host
 
-    def _color_axis(self, channel: int, title: str, left: str, right: str) -> QWidget:
+    def _color_axis(self, channel: int, title: str, tip: str, left: str, right: str) -> QWidget:
         host = QWidget()
-        layout = QVBoxLayout(host)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        layout.addWidget(QLabel(title))
-        row = QHBoxLayout()
+        row = QHBoxLayout(host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        row.addWidget(self._tone_caption(title, tip))
         slider = UnitSlider(Qt.Orientation.Horizontal)
         slider.setRange(-100, 100)
         slider.setSingleStep(1)
@@ -390,7 +405,7 @@ class ToneMixin:
         percent.valueChanged.connect(lambda value, index=channel: self._color_spin_edited(index, value))
         row.addWidget(slider, 1)
         row.addWidget(percent)
-        layout.addLayout(row)
+        slider.setToolTip(tip)
         self.color_sliders.append(slider)
         self.color_percents.append(percent)
         return host

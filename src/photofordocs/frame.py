@@ -79,7 +79,6 @@ from photofordocs.imageops import (
     open_image,
     ZOOM_MAX,
     ZOOM_MIN,
-    initial_frame_fit,
     place_crop,
     matte_to_alpha,
     move_middle,
@@ -383,13 +382,9 @@ class FrameMixin:
         else:
             shot.eye_t = detected
         shot.guides_manual = False
-        if shot.face is not None:
-            shot.zoom, shot.shift_x, shot.shift_y = initial_frame_fit(
-                shot.working.size, shot.face, fmt, shot.eye_t
-            )
-        else:
-            shot.zoom, shot.shift_x, shot.shift_y = 1.0, 0.0, 0.0
-        self._contain(shot)
+        # Рамка сразу стоит по лапкам. Сдвиг «чтобы влезла» прятал вылет и
+        # показывал в превью другой кадр, пока лапку не толкнут вручную.
+        shot.zoom, shot.shift_x, shot.shift_y = 1.0, 0.0, 0.0
         self._capture_ends(shot)
 
     def _apply_saved_format(self) -> None:

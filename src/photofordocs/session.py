@@ -613,6 +613,7 @@ class Settings:
     search_folder: str = ""
     photo_base: str = ""
     printer_name: str = ""
+    print_copies: int = 1
     printers: list[str] = field(default_factory=list)
     printer_dpi: int = 300
     export_dpi: int = 300
@@ -668,6 +669,7 @@ class Settings:
     sort_key: str = "name"
     sort_reverse: bool = False
     file_panel_width: int = 0
+    right_panel_width: int = 0
     preview_height: int = 0
     left_sizes: list[int] = field(default_factory=list)
     currency: str = "₽"
@@ -728,12 +730,14 @@ def load_settings() -> Settings:
     settings.theme = theme if theme in ("auto", "light", "dark") else "auto"
     for key, cast in (
         ("printer_dpi", int),
+        ("print_copies", int),
         ("export_dpi", int),
         ("watch_min_kb", int),
         ("jpeg_photo", int),
         ("jpeg_sheet", int),
         ("brush_px", int),
         ("file_panel_width", int),
+        ("right_panel_width", int),
         ("preview_height", int),
         ("save_max_kb", int),
     ):
@@ -832,6 +836,7 @@ def save_settings(settings: Settings) -> None:
         "search_folder": settings.search_folder,
         "photo_base": settings.photo_base,
         "printer_name": settings.printer_name,
+        "print_copies": max(1, int(settings.print_copies)),
         "printers": settings.printers,
         "printer_dpi": settings.printer_dpi,
         "export_dpi": settings.export_dpi,
@@ -887,6 +892,7 @@ def save_settings(settings: Settings) -> None:
         "sort_key": settings.sort_key,
         "sort_reverse": settings.sort_reverse,
         "file_panel_width": settings.file_panel_width,
+        "right_panel_width": settings.right_panel_width,
         "preview_height": settings.preview_height,
         "left_sizes": settings.left_sizes,
         "currency": settings.currency,

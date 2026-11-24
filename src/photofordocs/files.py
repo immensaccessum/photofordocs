@@ -436,8 +436,34 @@ class FilesMixin:
             sizes = [int(item) for item in self.left_split.sizes()]
             if len(sizes) == 3 and min(sizes) >= 48:
                 self.settings.left_sizes = sizes
+        splitter = getattr(self, "splitter", None)
+        right = getattr(self, "right", None)
+        if splitter is not None and right is not None and right.isVisible():
+            sizes = [int(item) for item in splitter.sizes()]
+            if len(sizes) == 3 and sizes[0] >= 180 and sizes[2] >= 260:
+                self.settings.file_panel_width = sizes[0]
+                self.settings.right_panel_width = sizes[2]
         self._capture_workplace()
         save_settings(self.settings)
+
+    def _restore_panel_widths(self) -> None:
+        """Ширины ставятся после показа: до этого разделитель ещё не знает размер окна."""
+        splitter = getattr(self, "splitter", None)
+        if splitter is None or not self.right.isVisible():
+            return
+        sizes = [int(item) for item in splitter.sizes()]
+        if len(sizes) != 3:
+            return
+        left = int(self.settings.file_panel_width)
+        right = int(self.settings.right_panel_width)
+        if left < 180:
+            left = sizes[0]
+        if right < 260:
+            right = sizes[2]
+        if left == sizes[0] and right == sizes[2]:
+            return
+        center = max(200, sum(sizes) - left - right)
+        splitter.setSizes([left, center, right])
 
     def _set_thumb(self, image: Image.Image) -> None:
         self._thumb_source = pil_to_pixmap(image)
@@ -830,8 +856,11 @@ class FilesMixin:
         self._file_order = (key, reverse)
         if hasattr(self, "_sort_held"):
             self._sort_held[key] = reverse
+        self.settings.sort_key = key
+        self.settings.sort_reverse = bool(reverse)
         self._sync_sort_buttons()
         self._fill_files()
+        self._remember()
 
     def _rotate_tree_source(self, item: QTreeWidgetItem, degrees: int) -> None:
         """Крутит оригинал из меню, а не тот снимок, который случайно открыт."""

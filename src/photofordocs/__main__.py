@@ -1,3 +1,4 @@
+import signal
 import sys
 from pathlib import Path
 
@@ -33,6 +34,9 @@ def main() -> None:
     if sys.platform.startswith("linux"):
         _desktop_entry()
     app = QApplication(sys.argv)
+    # Перезапуск через сигнал должен закрыть окно и записать ширины панелей.
+    signal.signal(signal.SIGTERM, lambda *_args: app.quit())
+    signal.signal(signal.SIGINT, lambda *_args: app.quit())
     install_indicator_style(app)
     app.setApplicationName(APP_ID)
     app.setApplicationDisplayName(APP_TITLE)

@@ -258,6 +258,10 @@ def stylesheet_for(dark: bool) -> str:
             margin-top: 14px;
             padding: 12px 8px 8px 8px;
         }}
+        QGroupBox#tonebox {{
+            margin-top: 10px;
+            padding: 6px 6px 4px 6px;
+        }}
         QGroupBox::title {{
             subcontrol-origin: margin;
             subcontrol-position: top left;
